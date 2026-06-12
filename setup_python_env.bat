@@ -4,6 +4,11 @@ cd /d "%~dp0"
 
 echo Creating a local Python environment for this project...
 
+set "_SETUP_TMP=%CD%\.setup_tmp"
+if not exist "%_SETUP_TMP%" mkdir "%_SETUP_TMP%"
+set "TEMP=%_SETUP_TMP%"
+set "TMP=%_SETUP_TMP%"
+
 if exist ".venv" (
     echo Removing existing .venv copied from another machine...
     rmdir /s /q ".venv"
@@ -50,4 +55,5 @@ echo .\.venv\Scripts\activate
 echo.
 echo Or run Python with:
 echo .\.venv\Scripts\python.exe
+if exist "%_SETUP_TMP%" rmdir /s /q "%_SETUP_TMP%"
 endlocal

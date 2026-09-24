@@ -3,13 +3,17 @@
 from pathlib import Path
 from collections import Counter
 import threading
+import ast
+import io
+import traceback
+from contextlib import redirect_stdout, redirect_stderr
 import sys
 import argparse
 import json
 import pickle
 import re
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyArrowPatch, Rectangle
+from matplotlib.patches import Rectangle
 import numpy as np
 
 CODE_folder = str(Path(__file__).resolve().parent)
@@ -54,62 +58,6 @@ def _get_plot_session_visualizations(force_agg: bool = False):
     return plot_session_visualizations
 
 
-def _show_startup_workflow_map() -> None:
-    nodes = {
-        "Input (Folder/NWB)": (0.6, 2.3, "#4C78A8"),
-        "Load session data": (2.4, 2.3, "#59A14F"),
-        "Performance": (4.2, 3.1, "#59A14F"),
-        "IR events": (4.2, 2.3, "#59A14F"),
-        "IR by trial": (4.2, 1.5, "#59A14F"),
-        "GUI output": (6.1, 2.9, "#4C78A8"),
-        "Plots": (6.1, 2.0, "#E15759"),
-        "CSV/JSON exports": (6.1, 1.1, "#4C78A8"),
-    }
-    edges = [
-        ("Input (Folder/NWB)", "Load session data"),
-        ("Load session data", "Performance"),
-        ("Load session data", "IR events"),
-        ("IR events", "IR by trial"),
-        ("Performance", "GUI output"),
-        ("IR by trial", "GUI output"),
-        ("Performance", "Plots"),
-        ("IR events", "Plots"),
-        ("IR by trial", "Plots"),
-        ("Load session data", "CSV/JSON exports"),
-    ]
-
-    fig, ax = plt.subplots(figsize=(10, 4.2))
-    ax.set_facecolor("#FAFAF7")
-
-    for source, target in edges:
-        sx, sy, _ = nodes[source]
-        tx, ty, _ = nodes[target]
-        arrow = FancyArrowPatch(
-            (sx, sy),
-            (tx, ty),
-            arrowstyle="-|>",
-            mutation_scale=12,
-            linewidth=1.3,
-            color="#606060",
-            alpha=0.6,
-            connectionstyle="arc3,rad=0.08",
-            shrinkA=16,
-            shrinkB=16,
-            zorder=1,
-        )
-        ax.add_patch(arrow)
-
-    for label, (x, y, color) in nodes.items():
-        ax.scatter(x, y, s=680, c=color, edgecolors="white", linewidths=1.7, zorder=3)
-        ax.text(x, y - 0.28, label, ha="center", va="top", fontsize=9, color="#222222", zorder=4)
-
-    ax.set_title("Behavior GUI pipeline map", fontsize=14, loc="left", pad=10)
-    ax.set_xlim(-0.1, 7.2)
-    ax.set_ylim(0.6, 3.5)
-    ax.axis("off")
-    fig.tight_layout()
-    plt.show(block=False)
-
 class ScanMediaFoldersApp:
     def __init__(self, root, initial_folder: str | None = None, initial_file: str | None = None) -> None:
         self.root = root
@@ -142,7 +90,8 @@ class ScanMediaFoldersApp:
         self.batch_hit_by_sound: dict[int, dict] = {}
         self.current_folder_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready")
-        self.run_button: ttk.Button | None = None
+        self.is_running = False
+        self.scan_generation = 0
         self.trial_viewer_button: ttk.Button | None = None
         self.trial_viewer_window = None
         self.trial_viewer_canvas = None
@@ -155,18 +104,96 @@ class ScanMediaFoldersApp:
         self.main_canvas_ax = None
         self.main_canvas_pick_cid = None
 
+        self.console_window = None
+        self.console_namespace = {}
+        self.console_session = None
+        self.guide_window = None
+        self.guide_settings_path = Path(CODE_folder) / "gui_preferences.json"
+        try:
+            preferences = json.loads(self.guide_settings_path.read_text(encoding="utf-8"))
+            show_guide = preferences.get("show_guide_at_startup", True)
+            if not isinstance(show_guide, bool):
+                show_guide = True
+        except (OSError, ValueError, AttributeError):
+            show_guide = True
+        self.show_guide_at_startup = tk.BooleanVar(value=show_guide)
         self._build_ui()
         self.folder_var.trace_add("write", lambda *_: self._sync_current_input_label())
         self.file_var.trace_add("write", lambda *_: self._sync_current_input_label())
         self._sync_current_input_label()
-        self._write_output("GUI ready. Choose a folder or NWB file and click Run.\n")
+        self._write_output("GUI ready. Choose a folder or NWB file, then click its Run rectangle in the Plot panel.\n")
+
+    def _save_guide_preference(self) -> None:
+        try:
+            self.guide_settings_path.write_text(
+                json.dumps({"show_guide_at_startup": self.show_guide_at_startup.get()}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            messagebox.showwarning(
+                "Preference not saved",
+                f"The guide setting applies for this session, but could not be saved:\n{exc}",
+                parent=self.guide_window,
+            )
+
+    def _show_getting_started(self) -> None:
+        if self.guide_window is not None and self.guide_window.winfo_exists():
+            self.guide_window.deiconify()
+            self.guide_window.lift()
+            return
+        window = tk.Toplevel(self.root)
+        self.guide_window = window
+        window.title("Getting started - BEHAVIOR v8")
+        window.geometry("740x680")
+        window.minsize(480, 360)
+        frame = ttk.Frame(window, padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Your first session", font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        ttk.Label(frame, text="Follow these steps, then keep this guide open while you work.").pack(
+            anchor="w", pady=(4, 12)
+        )
+        body = scrolledtext.ScrolledText(
+            frame, wrap="word", font=("Segoe UI", 11), padx=12, pady=12,
+            relief="flat", borderwidth=0, width=60, height=18,
+        )
+        body.pack(fill="both", expand=True)
+        body.tag_configure("heading", font=("Segoe UI", 12, "bold"), foreground="#245783",
+                           spacing1=12, spacing3=5)
+        body.tag_configure("paragraph", spacing3=10)
+        sections = [
+            ("1. Choose a session", "Open the Folder or File tab. Click Browse FOLDER for a raw session folder, or Browse NWB for a .nwb file. Check the path under Current session folder before continuing."),
+            ("2. Choose how hits are counted", "Under Hit source, choose IR for infrared sensor responses or Licks for lick responses. Choose the source appropriate for your experiment before clicking the Run rectangle in the Plot panel. To change it later, select the other source and run the analysis again."),
+            ("3. Run the analysis", "Click the selected session rectangle labeled Run in the Plot panel. Status shows Running... while the session is processed. After a successful run, Output shows trial counts and analysis results, and Trial viewer becomes available. If an error appears, read the error message and Output, check your input, and try again."),
+            ("4. Explore the results", "Read the summary in Output. In the Plot panel, click the colored boxes or dots for IR occupancy, Performance, or Hit by sound to open the available charts."),
+            ("5. Look at individual trials", "Click Trial viewer after running a session. Use Previous and Next, or enter a Trial index and click Go. Indices start at 0, so index 0 is the first trial."),
+            ("6. Keep your results", "In a separate plot window, use the Save icon on the Matplotlib toolbar to choose an image filename and location. The GUI has no CSV/JSON export button; those exports are available through terminal mode (--nogui with --outdir)."),
+            ("Optional: analyze several sessions", "Open the Animal tab and enter Animal name. Click Find NWB files or Find folders, then choose the parent folder to search. Check the matches in Output. Click Run All NWB or Run All Folders for the corresponding results. Use Batch performance in the Plot panel when it becomes available."),
+            ("Need this guide again?", "Open Help > Getting started. Clear the checkbox below if you prefer to open the guide only when you need it."),
+        ]
+        for heading, paragraph in sections:
+            body.insert("end", heading + "\n", "heading")
+            body.insert("end", paragraph + "\n\n", "paragraph")
+        body.configure(state="disabled")
+        footer = ttk.Frame(frame)
+        footer.pack(fill="x", pady=(14, 0))
+        ttk.Checkbutton(
+            footer, text="Show this guide at startup", variable=self.show_guide_at_startup,
+            command=self._save_guide_preference,
+        ).pack(side="left")
+        ttk.Button(footer, text="Close guide", command=window.destroy).pack(side="right")
+        window.bind("<Escape>", lambda _event: window.destroy())
 
     def _build_ui(self) -> None:
+        menu_bar = tk.Menu(self.root)
+        help_menu = tk.Menu(menu_bar, tearoff=False)
+        help_menu.add_command(label="Getting started", command=self._show_getting_started)
+        menu_bar.add_cascade(label="Help", menu=help_menu)
+        self.root.configure(menu=menu_bar)
         main_frame = ttk.Frame(self.root, padding=16)
         main_frame.pack(fill="both", expand=True)
         title_label = ttk.Label(
             main_frame,
-            text="Check Session",
+            text="Check Single Sessions",
             font=("Segoe UI", 14, "bold"),
         )
         title_label.pack(anchor="w")
@@ -174,7 +201,7 @@ class ScanMediaFoldersApp:
         description_label = ttk.Label(
             main_frame,
             text=(
-                "Enter a folder, then click Run. "                
+                "Choose a folder or NWB file, then click its Run rectangle in the Plot panel. "                
             ),
             wraplength=700,
         )
@@ -202,16 +229,13 @@ class ScanMediaFoldersApp:
         )
         browse_button2.grid(row=0, column=2, padx=(0, 10))
 
-        self.run_button = ttk.Button(input_tab, text="Run", command=self._start_scan)
-        self.run_button.grid(row=0, column=3)
-
         self.trial_viewer_button = ttk.Button(
             input_tab,
             text="Trial viewer",
             command=self._open_trial_viewer,
             state="disabled",
         )
-        self.trial_viewer_button.grid(row=0, column=4, padx=(10, 0))
+        self.trial_viewer_button.grid(row=0, column=3, padx=(10, 0))
 
         ttk.Label(input_tab, text="Hit source:").grid(
             row=1, column=0, sticky="w", pady=(10, 0), padx=(0, 10)
@@ -314,34 +338,58 @@ class ScanMediaFoldersApp:
         self.main_canvas.draw()
         self.main_canvas.get_tk_widget().pack(fill="both", expand=True)
 
+    def _reset_session(self) -> None:
+        # Ignore any worker results belonging to the previous selection.
+        self._close_session_console()
+        self.console_namespace = {}
+        self.console_session = None
+        self.scan_generation += 1
+        self.is_running = False
+        self._close_trial_viewer()
+        for name in (
+            "session_target_folder", "single_session_datadict", "single_session_performance",
+            "single_session_hit_by_sound", "single_session_ir_events", "single_session_trial_ir_analysis",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
+        self.found_nwb_files = []
+        self.found_session_folders = []
+        self.batch_performance_by_file = {}
+        self.batch_trial_performance_by_file = {}
+        self.batch_trials_by_sound_id = {}
+        self.batch_hit_by_sound = {}
+        self.folder_var.set("")
+        self.file_var.set("")
+        self.animal_var.set("")
+        self.status_var.set("Ready - choose a session")
+        self.trial_viewer_button.configure(state="disabled")
+        self.main_canvas_ax.clear()
+        self.main_canvas_ax.set_xticks([])
+        self.main_canvas_ax.set_yticks([])
+        for spine in self.main_canvas_ax.spines.values():
+            spine.set_visible(False)
+        self.main_canvas.draw()
+
     def _browse_folder(self) -> None:
-        selected = filedialog.askdirectory(initialdir=self.folder_var.get() or ".")
+        initial_dir = self.folder_var.get() or "."
+        self._reset_session()
+        selected = filedialog.askdirectory(initialdir=initial_dir)
         if selected:
-            self.folder_var.set(selected)
             self.active_input = "folder"
-            self.found_nwb_files = []
-            self.found_session_folders = []
-            self.batch_performance_by_file = {}
-            self.batch_trial_performance_by_file = {}
-            self.batch_trials_by_sound_id = {}
-            self.batch_hit_by_sound = {}
+            self.folder_var.set(selected)
             self._sync_current_input_label()
             self._draw_selected_input_box()
 
     def _browse_nwb(self):
+        initial_dir = self.file_var.get() or "."
+        self._reset_session()
         selected = filedialog.askopenfilename(
-            initialdir=self.file_var.get() or ".",
+            initialdir=initial_dir,
             filetypes=[("NWB files", "*.nwb"), ("All files", "*.*")],
         )
         if selected:
-            self.file_var.set(selected)
             self.active_input = "file"
-            self.found_nwb_files = []
-            self.found_session_folders = []
-            self.batch_performance_by_file = {}
-            self.batch_trial_performance_by_file = {}
-            self.batch_trials_by_sound_id = {}
-            self.batch_hit_by_sound = {}
+            self.file_var.set(selected)
             self._sync_current_input_label()
             self._draw_selected_input_box()
 
@@ -609,6 +657,8 @@ class ScanMediaFoldersApp:
         self._draw_selected_input_box()
 
     def _start_scan(self) -> None:
+        if self.is_running:
+            return
         folder_text = self.folder_var.get().strip()
         file_text = self.file_var.get().strip()
 
@@ -657,13 +707,17 @@ class ScanMediaFoldersApp:
 
         worker = threading.Thread(
             target=self._run_scan_worker,
-            args=(selected_path, hit_source),
+            args=(selected_path, hit_source, self.scan_generation),
             daemon=True,
         )
         
         worker.start()
 
-    def _run_scan_worker(self, target_path: Path, hit_source: str) -> None:
+    def _deliver_scan_result(self, generation, callback, *args) -> None:
+        if generation == self.scan_generation:
+            callback(*args)
+
+    def _run_scan_worker(self, target_path: Path, hit_source: str, generation: int) -> None:
         try:
             is_valid_folder = target_path.is_dir()
             is_valid_file = target_path.is_file() and target_path.suffix.lower() == ".nwb"
@@ -686,6 +740,8 @@ class ScanMediaFoldersApp:
             
             self.root.after(
                 0,
+                self._deliver_scan_result,
+                generation,
                 self._handle_scan_success,
                 target_path,
                 data_session_dict,
@@ -695,7 +751,7 @@ class ScanMediaFoldersApp:
                 trial_ir_analysis,
             )
         except Exception as exc:  # pragma: no cover - GUI error path
-            self.root.after(0, self._handle_scan_error, target_path, exc)
+            self.root.after(0, self._deliver_scan_result, generation, self._handle_scan_error, target_path, exc)
 
     def _handle_scan_success(
         self,
@@ -717,7 +773,9 @@ class ScanMediaFoldersApp:
         self._write_output('nTrials: ' + str(data_session_dict['nTotalTrials']) + '\n')
         self._write_output(f"IR valid events: {len(ir_events['debut_fork'])}\n")
         self._write_output(f"Analyzed trials (IRxTrial): {trial_ir_analysis['n_analyzed_trials']}\n")
-        self._write_output(f"Stay>=750ms at reward window: {trial_ir_analysis['pct_above_750ms']:.1f}%\n")
+        self._write_output(f"Stay>={trial_ir_analysis['stay_threshold_ms']:g}ms at reward window "
+                           f"(percIRFork={trial_ir_analysis['perc_ir_fork']:g}%): "
+                           f"{trial_ir_analysis['pct_above_threshold']:.1f}%\n")
         if hit_by_sound:
             self._write_output("Hit by SoundId:\n")
             for sid, stats in hit_by_sound.items():
@@ -765,8 +823,8 @@ class ScanMediaFoldersApp:
             self.current_folder_var.set("(none)")
         
     def _set_running_state(self, is_running: bool) -> None:
-        if self.run_button is not None:
-            self.run_button.configure(state="disabled" if is_running else "normal")
+        self.is_running = is_running
+        self._draw_selected_input_box()
         if self.trial_viewer_button is not None:
             has_session = hasattr(self, "single_session_datadict")
             state = "disabled" if is_running or not has_session else "normal"
@@ -820,12 +878,14 @@ class ScanMediaFoldersApp:
             facecolor="#F7FBFF",
             edgecolor="#4C78A8",
             linewidth=1.5,
+            picker=not self.is_running,
         )
+        rect.set_gid("run_session")
         ax.add_patch(rect)
         ax.text(
             0.08,
             0.90,
-            input_label,
+            "Running..." if self.is_running else f"Run {input_label}",
             fontsize=10,
             fontweight="bold",
             color="#222222",
@@ -862,11 +922,13 @@ class ScanMediaFoldersApp:
                 edgecolor="#59A14F",
                 linewidth=1.5,
             )
+            result_rect.set_picker(True)
+            result_rect.set_gid("session_console")
             ax.add_patch(result_rect)
             ax.text(
                 0.08,
                 rect_y + rect_height - 0.04,
-                "Session variables",
+                "Session variables (click to inspect)",
                 fontsize=10,
                 fontweight="bold",
                 color="#222222",
@@ -1033,7 +1095,11 @@ class ScanMediaFoldersApp:
         self.main_canvas.draw()
 
     def _handle_main_canvas_pick(self, event) -> None:
-        if event.artist.get_gid() == "plot_ir_occupancy_by_sound":
+        if event.artist.get_gid() == "run_session":
+            self._start_scan()
+        elif event.artist.get_gid() == "session_console":
+            self._open_session_console()
+        elif event.artist.get_gid() == "plot_ir_occupancy_by_sound":
             self._open_ir_occupancy_plot()
         elif event.artist.get_gid() == "plot_performance":
             self._open_performance_plot()
@@ -1041,6 +1107,69 @@ class ScanMediaFoldersApp:
             self._open_hit_by_sound_plot()
         elif event.artist.get_gid() == "plot_batch_session_performance":
             self._open_batch_session_performance_plot()
+
+    def _close_session_console(self) -> None:
+        if self.console_window is not None and self.console_window.winfo_exists():
+            self.console_window.destroy()
+        self.console_window = None
+
+    def _open_session_console(self) -> None:
+        if not hasattr(self, "single_session_datadict"):
+            return
+        if self.console_window is not None and self.console_window.winfo_exists():
+            self.console_window.deiconify()
+            self.console_window.lift()
+            return
+        window = tk.Toplevel(self.root)
+        self.console_window = window
+        window.title("Session variables - Python console")
+        window.geometry("720x380")
+        window.minsize(480, 260)
+        window.protocol("WM_DELETE_WINDOW", self._close_session_console)
+        frame = ttk.Frame(window, padding=14)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Inspect the loaded session", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        ttk.Label(frame, text="Write Python below, then click Execute. Results appear in Output.").pack(anchor="w", pady=(4, 8))
+        self.console_input = scrolledtext.ScrolledText(frame, wrap="none", font=("Consolas", 11), height=8)
+        self.console_input.pack(fill="both", expand=True)
+        self.console_input.insert("1.0", "print(single_session_datadict.keys())")
+        ttk.Label(frame, text="Commands run as Python and can modify session data and files.").pack(anchor="w", pady=(8, 4))
+        controls = ttk.Frame(frame)
+        controls.pack(fill="x")
+        ttk.Button(controls, text="Execute", command=self._execute_session_command).pack(side="left")
+        ttk.Button(controls, text="Close", command=self._close_session_console).pack(side="right")
+        self.console_input.focus_set()
+
+    def _execute_session_command(self) -> None:
+        if self.is_running or not hasattr(self, "single_session_datadict"):
+            self._write_output("Console: load a session and wait for analysis to finish first.\n")
+            return
+        source = self.console_input.get("1.0", "end-1c").strip()
+        if not source:
+            return
+        if self.console_session is not self.single_session_datadict:
+            self.console_namespace = {"np": np, "__name__": "__session_console__"}
+            self.console_session = self.single_session_datadict
+        for name in (
+            "single_session_datadict", "single_session_performance", "single_session_hit_by_sound",
+            "single_session_ir_events", "single_session_trial_ir_analysis",
+        ):
+            self.console_namespace[name] = getattr(self, name)
+        self._write_output("\n>>> " + source.replace("\n", "\n... ") + "\n")
+        captured = io.StringIO()
+        with redirect_stdout(captured), redirect_stderr(captured):
+            try:
+                tree = ast.parse(source, filename="<session console>", mode="exec")
+                # Display a final expression, as in an interactive Python console.
+                expression = tree.body.pop() if tree.body and isinstance(tree.body[-1], ast.Expr) else None
+                exec(compile(tree, "<session console>", "exec"), self.console_namespace)
+                if expression is not None:
+                    result = eval(compile(ast.Expression(expression.value), "<session console>", "eval"), self.console_namespace)
+                    if result is not None:
+                        print(repr(result))
+            except BaseException:
+                traceback.print_exc()
+        self._write_output(captured.getvalue() or "Command completed (no output).\n")
 
     def _open_ir_occupancy_plot(self) -> None:
         if not hasattr(self, "single_session_datadict"):
@@ -1745,7 +1874,8 @@ def main() -> None:
 
     root = tk.Tk()
     app = ScanMediaFoldersApp(root, initial_folder=str(args.folder), initial_file = str(args.file))
-    _show_startup_workflow_map()
+    if app.show_guide_at_startup.get():
+        root.after_idle(app._show_getting_started)
     root.mainloop()
 
 

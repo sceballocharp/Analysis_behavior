@@ -334,6 +334,42 @@ def extract_performance(session_datadict):
         "total": perf_total,
     }
 
+def _ir_stay_threshold_ms(session, reward_window_ms=1000):
+    """Read the session's required IR occupancy percentage (NWB or raw folder)."""
+    params = session.get("parameters", {})
+    if isinstance(params, pd.DataFrame):
+        parsed = read_params(params)
+        if "percIRFork" in params.columns and not params.empty:
+            parsed["percIRFork"] = params["percIRFork"].iloc[0]
+        # Raw CSV headers can contain the first key=value parameter.
+        for column in params.columns:
+            for token in str(column).split():
+                if token.startswith("percIRFork="):
+                    parsed.setdefault("percIRFork", token.split("=", 1)[1])
+        params = parsed
+    value = None
+    for key, candidate in params.items():
+        if isinstance(key, bytes):
+            key = key.decode("utf-8")
+        if str(key).strip() == "percIRFork":
+            value = candidate
+            break
+    if isinstance(value, (list, tuple, np.ndarray)):
+        value = np.asarray(value).reshape(-1)
+        if value.size != 1:
+            raise ValueError("Expected one percIRFork percentage for this session.")
+        value = value[0]
+    try:
+        percent = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Missing or invalid session parameter percIRFork (expected 0 to 100).") from exc
+    if not np.isfinite(percent) or not 0 <= percent <= 100:
+        raise ValueError("percIRFork must be a finite percentage from 0 to 100.")
+    if not np.isfinite(reward_window_ms) or reward_window_ms <= 0:
+        raise ValueError("Reward-window duration must be positive.")
+    return percent * reward_window_ms / 100.0
+
+
 def extract_hit_by_sound_IR(session_datadict, trial_ir_analysis):
     """
     Compute hit metrics independently for each SoundId present in ResultsTable.
@@ -347,6 +383,8 @@ def extract_hit_by_sound_IR(session_datadict, trial_ir_analysis):
     if data_r.empty:
         return {}
 
+    threshold_ms = trial_ir_analysis["stay_threshold_ms"]
+    sample_rate = trial_ir_analysis.get("sample_rate_hz", 1000)
     sound_ids = pd.to_numeric(data_r["SoundId"], errors="raise").astype(int)
     
     hit_by_sound = {}
@@ -365,7 +403,7 @@ def extract_hit_by_sound_IR(session_datadict, trial_ir_analysis):
                 fork_events = trial_ir_analysis['dict_data_IRxTrial'][tr_idx]['timespent_each_time']
                 if len(fork_events)>0:
                     timespent = np.sum(fork_events)
-                    if timespent >= 750:
+                    if timespent * 1000.0 / sample_rate >= threshold_ms:
                         FAs.append(1)
                         allTrialsAsGO.append(1)
                     else:
@@ -496,6 +534,13 @@ def analyze_ir_by_trial(
     to reward-window start. occupancy_mode="full_trial" uses each trial's full
     start/stop interval and pads shorter trials to the longest trial duration.
     """
+    threshold_ms = _ir_stay_threshold_ms(data_session_dict, timereward_ms)
+    threshold_metadata = {
+        "stay_threshold_ms": threshold_ms,
+        "reward_window_ms": float(timereward_ms),
+        "perc_ir_fork": threshold_ms / timereward_ms * 100.0,
+        "sample_rate_hz": fe,
+    }
     data_trial_id = np.asarray(data_session_dict["trialID"]["full"])
     data_ir = np.asarray(data_session_dict["dataIR"]["full"])
     mean_ir_val = float(data_session_dict["dataIR"]["mean"])
@@ -546,7 +591,8 @@ def analyze_ir_by_trial(
                 "dict_data_IRxTrial": dict_data_ir_x_trial,
                 "viz_visits": viz_visits,
                 "n_analyzed_trials": 0,
-                "pct_above_750ms": 0.0,
+                "pct_above_threshold": 0.0,
+                **threshold_metadata,
                 "occupancy_mode": occupancy_mode,
                 "occupancy_x_label": "Time from trial start (samples)",
                 "occupancy_title": "IR occupancy across full trial",
@@ -585,7 +631,8 @@ def analyze_ir_by_trial(
             "dict_data_IRxTrial": dict_data_ir_x_trial,
             "viz_visits": viz_visits,
             "n_analyzed_trials": len(dict_data_ir_x_trial),
-            "pct_above_750ms": 0.0,
+            "pct_above_threshold": 0.0,
+                **threshold_metadata,
             "occupancy_mode": occupancy_mode,
             "occupancy_x_label": "Time from trial start (samples)",
             "occupancy_title": "IR occupancy across full trial",
@@ -599,7 +646,8 @@ def analyze_ir_by_trial(
             "dict_data_IRxTrial": dict_data_ir_x_trial,
             "viz_visits": viz_visits,
             "n_analyzed_trials": 0,
-            "pct_above_750ms": 0.0,
+            "pct_above_threshold": 0.0,
+                **threshold_metadata,
             "occupancy_mode": occupancy_mode,
             "occupancy_x_label": "Time (samples; 1000 = RW start)",
             "occupancy_title": "IR occupancy aligned to reward window",
@@ -678,18 +726,19 @@ def analyze_ir_by_trial(
 
     analyzed_rows = list(dict_data_ir_x_trial.keys())
     if len(analyzed_rows) == 0:
-        pct_above_750ms = 0.0
+        pct_above_threshold = 0.0
     else:
-        reward_col = 1000 + 750
+        reward_col = 1000 + int(round(threshold_ms * fe / 1000.0))
         if reward_col >= viz_visits.shape[1]:
             reward_col = viz_visits.shape[1] - 1
-        pct_above_750ms = float(np.mean(viz_visits[analyzed_rows, reward_col]) * 100.0)
+        pct_above_threshold = float(np.mean(viz_visits[analyzed_rows, reward_col]) * 100.0)
 
     return {
         "dict_data_IRxTrial": dict_data_ir_x_trial,
         "viz_visits": viz_visits,
         "n_analyzed_trials": len(analyzed_rows),
-        "pct_above_750ms": pct_above_750ms,
+        "pct_above_threshold": pct_above_threshold,
+        **threshold_metadata,
         "occupancy_mode": occupancy_mode,
         "occupancy_x_label": "Time (samples; 1000 = RW start)",
         "occupancy_title": "IR occupancy aligned to reward window",
@@ -894,7 +943,7 @@ def batch_ir_go_by_sound_from_nwb(
     data_basil_server: str = "Y:/User_folders/Sebastian/behavior_data/",
     data_basil: str = "Y:/Bathellierlab_gaia/BASIL/BASIL_FAIR/BASILapp/NWB/",
     nwb_root: Path | str | None = None,
-    go_threshold_ms: int = 750,
+    go_threshold_ms: float | None = None,
     save_folder: Path | str | None = None,
     save_filename: str | None = None,
 ) -> dict:
@@ -932,6 +981,8 @@ def batch_ir_go_by_sound_from_nwb(
 
         ir_events = detect_ir_events(data_session_dict["dataIR"]["full"])
         trial_ir_analysis = analyze_ir_by_trial(data_session_dict, ir_events)
+        session_threshold_ms = (trial_ir_analysis["stay_threshold_ms"]
+                                if go_threshold_ms is None else go_threshold_ms)
 
         results_table = data_session_dict["ResultsTable"]
         n_trials = len(results_table["TrialType"])
@@ -951,9 +1002,9 @@ def batch_ir_go_by_sound_from_nwb(
                     if len(timespent_each_time) > 0:
                         all_time = np.sum(timespent_each_time)
                         all_data_time[trial_idx] = int(all_time)
-                        if (trial_type == 1) and (all_time >= go_threshold_ms):
+                        if (trial_type == 1) and (all_time >= session_threshold_ms):
                             all_data_go[trial_idx] = 1
-                        elif (trial_type == 2) and (all_time < go_threshold_ms):
+                        elif (trial_type == 2) and (all_time < session_threshold_ms):
                             all_data_go[trial_idx] = 1
                 except KeyError:
                     pass
@@ -1152,7 +1203,7 @@ def batch_ir_go_by_sound_from_folders_freelymoving(
     data_basil_server: str = "Y:/User_folders/Sebastian/behavior_data/",
     data_basil_github: str = "C:/Users/seceball/Documents/GitHub/pyBASIL/data/",
     folder_root: Path | str | None = None,
-    go_threshold_ms: int = 750,
+    go_threshold_ms: float | None = None,
     save_folder: Path | str | None = None,
     save_filename: str | None = None,
 ) -> dict:
@@ -1191,6 +1242,8 @@ def batch_ir_go_by_sound_from_folders_freelymoving(
 
         ir_events = detect_ir_events(data_session_dict["dataIR"]["full"])
         trial_ir_analysis = analyze_ir_by_trial(data_session_dict, ir_events)
+        session_threshold_ms = (trial_ir_analysis["stay_threshold_ms"]
+                                if go_threshold_ms is None else go_threshold_ms)
 
         data_r = data_session_dict["ResultsTable"]
         n_trials = len(data_r)
@@ -1213,9 +1266,9 @@ def batch_ir_go_by_sound_from_folders_freelymoving(
                     if len(timespent_each_time) > 0:
                         all_time = np.sum(timespent_each_time)
                         all_data_time[trial_idx] = int(all_time)
-                        if (ttype == 1) and (all_time >= go_threshold_ms):
+                        if (ttype == 1) and (all_time >= session_threshold_ms):
                             all_data_go[trial_idx] = 1
-                        elif (ttype == 2) and (all_time < go_threshold_ms):
+                        elif (ttype == 2) and (all_time < session_threshold_ms):
                             all_data_go[trial_idx] = 1
                 except KeyError:
                     pass

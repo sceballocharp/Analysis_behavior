@@ -588,6 +588,18 @@ def plot_ir_occupancy_by_sound(data_session_dict, trial_ir_analysis, show=True, 
     x_label = trial_ir_analysis.get("occupancy_x_label", "Time (samples; 1000 = RW start)")
     plot_title = trial_ir_analysis.get("occupancy_title", "IR occupancy aligned to reward window")
 
+    def _add_trial_lines(ax, viz_data):
+        if viz_data.size == 0:
+            return
+        ax.hlines(
+            np.arange(viz_data.shape[0] + 1) - 0.5,
+            -0.5,
+            viz_data.shape[1] - 0.5,
+            colors="#8AACC4",
+            linewidths=0.35,
+            alpha=0.65,
+        )
+
     def _mean_occupancy(viz_data):
         if viz_data.size == 0:
             return np.array([])
@@ -662,6 +674,8 @@ def plot_ir_occupancy_by_sound(data_session_dict, trial_ir_analysis, show=True, 
                 transform=ax_hm_2.transAxes,
             )
 
+        _add_trial_lines(ax_hm_1, viz_sound1)
+        _add_trial_lines(ax_hm_2, viz_sound2)
         ax_hm_1.set_title(f"SoundId = 1 (n={viz_sound1.shape[0]})")
         ax_hm_2.set_title(f"SoundId = 2 (n={viz_sound2.shape[0]})")
         ax_hm_1.set_ylabel("Trial index")
@@ -722,6 +736,7 @@ def plot_ir_occupancy_by_sound(data_session_dict, trial_ir_analysis, show=True, 
     fig = plt.figure()
     ax_hm = fig.add_subplot(1, 1, 1)
     ax_hm.imshow(viz_visits, aspect="auto", interpolation="nearest", cmap="Greys")
+    _add_trial_lines(ax_hm, viz_visits)
     ax_hm.set_title(plot_title)
     ax_hm.set_xlabel(x_label)
     ax_hm.set_ylabel("Trial index")

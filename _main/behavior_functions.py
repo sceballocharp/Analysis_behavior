@@ -235,6 +235,7 @@ def load_session_data_fromFile(session_data_nwbFile):
         data_ir = nwbOjb.IR_signal
         return {
             "parameters": nwbOjb.parameters,
+            "signals": nwbOjb.signals,
             "dataIR": {
                 "full": data_ir,
                 "mean": float(data_ir.mean()) if len(data_ir) > 0 else float("nan"),
@@ -272,6 +273,9 @@ def extract_performance(session_datadict):
     """
     Compute Go, NoGo, and total performance for one session.
     """
+    from dmts_analysis import is_dmts_lick, analyze_dmts
+    if is_dmts_lick(session_datadict):
+        return analyze_dmts(session_datadict)["performance"]
     data_r = session_datadict["ResultsTable"]
     if data_r.empty:
         raise ValueError("ResultsTable est vide, impossible de calculer les performances.")
@@ -468,6 +472,41 @@ def extract_hit_by_sound_licks(session_datadict, trial_ir_analysis):
             }
 
     return hit_by_sound
+
+
+def analyze_lick_events_by_trial(session, events, rw_fix=1.0, trial_bin_s=0.1,
+                                fe=1000, pre_rw_entry_tolerance_ms=150):
+    """Group signal events using the existing lick window, without IR occupancy.
+
+    Preserve the legacy timing and exclusion of the first/last trials. The
+    compatibility key is consumed by extract_hit_by_sound_licks.
+    """
+    markers = np.flatnonzero(np.asarray(session["trialID"]["full"]) == 99)
+    starts = np.asarray(events["debut_fork"], dtype=int)
+    signal_length = len(session["dataIR"]["full"])
+    trials = {}
+    for index in range(1, min(int(session["nTotalTrials"]), len(markers)) - 1):
+        start = int((markers[index] + 1) * trial_bin_s * fe)
+        if start >= signal_length:
+            continue
+        end = min(int(((markers[index] + 1) * trial_bin_s + rw_fix) * fe),
+                  signal_length - 1)
+        selected = (starts >= start - pre_rw_entry_tolerance_ms) & (starts <= end)
+        trials[index] = {"forks_timestamps": starts[selected]}
+    return {"dict_data_IRxTrial": trials}
+
+
+def analyze_session_responses(session, hit_source="IR"):
+    """Return IR results only for IR mode; count signal events in Licks mode."""
+    from dmts_analysis import is_dmts_lick, analyze_dmts
+    if is_dmts_lick(session):
+        return None, None, analyze_dmts(session)["hit_by_sound"]
+    events = detect_ir_events(session["dataIR"]["full"])
+    if hit_source == "Licks":
+        lick_trials = analyze_lick_events_by_trial(session, events)
+        return None, None, extract_hit_by_sound_licks(session, lick_trials)
+    analysis = analyze_ir_by_trial(session, events)
+    return events, analysis, extract_hit_by_sound_IR(session, analysis)
 
 
 def detect_ir_events(data_ir, rise_threshold=0.5, fall_threshold=-1.0):
@@ -842,12 +881,16 @@ def process_batch_session(
     batch_hit_by_sound: dict[int, dict],
 ) -> tuple[dict, dict]:
     single_session_performance = extract_performance(data_session_dict)
-    ir_events = detect_ir_events(data_session_dict["dataIR"]["full"])
-    trial_ir_analysis = analyze_ir_by_trial(data_session_dict, ir_events)
-    single_hit_by_sound = hit_by_sound_func(
-        data_session_dict,
-        trial_ir_analysis,
-    )
+    if 'dmts_analysis' in data_session_dict:
+        single_hit_by_sound = data_session_dict['dmts_analysis']['hit_by_sound']
+    else:
+        ir_events = detect_ir_events(data_session_dict["dataIR"]["full"])
+        trial_ir_analysis = (
+            analyze_lick_events_by_trial(data_session_dict, ir_events)
+            if hit_by_sound_func is extract_hit_by_sound_licks
+            else analyze_ir_by_trial(data_session_dict, ir_events)
+        )
+        single_hit_by_sound = hit_by_sound_func(data_session_dict, trial_ir_analysis)
     append_trials_by_sound_id(
         trials_by_sound_id,
         data_session_dict,

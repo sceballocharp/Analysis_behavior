@@ -182,7 +182,10 @@ def plot_performance(perf_data, info_data, trial_ir_analysis=None, show=True, bl
     ax.set_title(f"Session - {n_trials} trials")
     ax.set_ylim(-10, 110)
     ax.set_yticks([0, 50, 100])
-    ax.legend(["Go", "NoGo", "Total"], frameon=False)
+    ax.legend(["Match", "Nonmatch", "Total"] if perf_data.get('task') == 'DMTS' else ["Go", "NoGo", "Total"], frameon=False)
+    if perf_data.get('task') == 'DMTS':
+        ax.set_title(f"DMTS — {n_trials} trials ({perf_data.get('n_blank', 0)} blanks excluded)")
+        ax.set_ylabel('Correct (%)')
 
     if has_trial_ir:
         results_table = info_data["ResultsTable"]
@@ -449,6 +452,9 @@ def plot_trial_ir_and_sound(
     show=True,
     block=False,
 ):
+    from dmts_analysis import is_dmts_lick, plot_dmts_trial
+    if is_dmts_lick(data_session_dict):
+        return plot_dmts_trial(data_session_dict, trial_index, show=show, block=block)
     data_trial_id = np.asarray(data_session_dict["trialID"]["full"])
     data_ir = np.asarray(data_session_dict["dataIR"]["full"])
     sound_signal = np.asarray(data_session_dict["sound_signal"])
@@ -582,6 +588,8 @@ def plot_trial_ir_and_sound(
     return fig
 
 def plot_ir_occupancy_by_sound(data_session_dict, trial_ir_analysis, show=True, block=False):
+    if trial_ir_analysis is None:
+        return None
     viz_visits = trial_ir_analysis["viz_visits"]
     if viz_visits.size == 0:
         return None
@@ -817,6 +825,9 @@ def plot_hit_by_sound(
     hit_source = batch_metadata.get("hit_source", "")
     if title is None:
         title = "%GO by sound" if batch_metadata else "FA percentage by sound"
+        if all(stats.get('metric') == 'DMTS correct' for stats in normalized_hit_by_sound.values()):
+            title = 'DMTS accuracy by test sound'
+            x_label = 'Test sound ID'
         if animal_name:
             title += f" - {animal_name}"
 
@@ -837,6 +848,8 @@ def plot_hit_by_sound(
 
     ax.set_xlabel(x_label, fontsize=12, labelpad=10)
     ax.set_ylabel("GO trials (%)", fontsize=12, labelpad=10)
+    if all(stats.get('metric') == 'DMTS correct' for stats in normalized_hit_by_sound.values()):
+        ax.set_ylabel('Correct trials (%)', fontsize=12, labelpad=10)
     ax.set_xticks(sound_x)
     ax.set_ylim(0, max(100, max(fa_pct) * 1.18 if fa_pct else 100))
     ax.grid(True, axis="y", color="#D9D9D9", linewidth=0.8)
@@ -2464,7 +2477,8 @@ def plot_session_visualizations(
             block=block,
         )
     )
-    figures.append(plot_ir_events(data_session_dict, ir_events, show=show, block=block))
+    if ir_events is not None:
+        figures.append(plot_ir_events(data_session_dict, ir_events, show=show, block=block))
     fig_occ = plot_ir_occupancy_by_sound(
         data_session_dict,
         trial_ir_analysis,

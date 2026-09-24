@@ -167,6 +167,19 @@ class session_data_nwb():
             self.reward_signal = reward
             self.trialtype = trialtype
             self.IR_signal = IRdata
+            self.signals = {}
+            for name, group in [(name, h5f['acquisition'][name]) for name in
+                                ('LeftLick', 'RightLick', 'Reward', 'TrialType')
+                                if name in h5f['acquisition']] + [
+                                    ('SoundCopy', h5f['stimulus/presentation/SoundCopy']),
+                                    ('WhichSound', h5f['stimulus/presentation/WhichSound'])]:
+                signal = {'data': np.asarray(group['data'])}
+                if 'timestamps' in group:
+                    signal['timestamps'] = np.asarray(group['timestamps'])
+                else:
+                    signal['start'] = float(group['starting_time'][()])
+                    signal['rate'] = float(group['starting_time'].attrs['rate'])
+                self.signals[name] = signal
             
         return
     
@@ -213,6 +226,11 @@ class session_data_nwb():
             if "start_time" in trials_group and "stop_time" in trials_group:
                 data["StartTime"] = np.array(trials_group['start_time'][:])
                 data["StopTime"] = np.array(trials_group['stop_time'][:])
+            for source, target in [('sample_sound_ids', 'SampleSoundId'),
+                                   ('test_sound_ids', 'TestSoundId')]:
+                if source in trials_group:
+                    data[target] = np.asarray(trials_group[source])
+            data['SavedOutcome'] = result_by_trial_string
             
             self.results_table = pd.DataFrame(data)
         

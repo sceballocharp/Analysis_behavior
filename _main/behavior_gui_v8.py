@@ -27,6 +27,8 @@ from behavior_functions import (
     extract_hit_by_sound_licks,
     detect_ir_events,
     analyze_ir_by_trial,
+    analyze_session_responses,
+    analyze_lick_events_by_trial,
     find_nwb_files_for_animal,
     run_nwb_batch_analysis,
 )
@@ -542,12 +544,8 @@ class ScanMediaFoldersApp:
             try:
                 data_session_dict = load_session_data_fromFile(nwb_path)
                 single_session_performance = extract_performance(data_session_dict)
-                ir_events = detect_ir_events(data_session_dict["dataIR"]["full"])
-                trial_ir_analysis = analyze_ir_by_trial(data_session_dict, ir_events)
-                single_hit_by_sound = hit_by_sound_func(
-                    data_session_dict,
-                    trial_ir_analysis,
-                )
+                ir_events, trial_ir_analysis, single_hit_by_sound = analyze_session_responses(
+                    data_session_dict, hit_source)
                 session_key = str(nwb_path)
                 self.batch_performance_by_file[session_key] = single_session_performance
                 results_table = data_session_dict["ResultsTable"]
@@ -557,6 +555,10 @@ class ScanMediaFoldersApp:
                 correct = np.full(len(results_table), np.nan, dtype=float)
                 correct[trial_type == 1] = hit[trial_type == 1]
                 correct[trial_type == 2] = cr[trial_type == 2]
+                if 'DMTSOutcome' in results_table:
+                    outcome = results_table['DMTSOutcome']
+                    correct = np.where(outcome.isin(['Hit', 'Correct']), 1.,
+                                       np.where(outcome.isin(['Miss', 'FalseAlarm']), 0., np.nan))
                 self.batch_trial_performance_by_file[session_key] = {
                     "trial_type": trial_type,
                     "correct": correct,
@@ -611,12 +613,8 @@ class ScanMediaFoldersApp:
             try:
                 data_session_dict = load_session_data_fromFolder(session_folder)
                 single_session_performance = extract_performance(data_session_dict)
-                ir_events = detect_ir_events(data_session_dict["dataIR"]["full"])
-                trial_ir_analysis = analyze_ir_by_trial(data_session_dict, ir_events)
-                single_hit_by_sound = hit_by_sound_func(
-                    data_session_dict,
-                    trial_ir_analysis,
-                )
+                ir_events, trial_ir_analysis, single_hit_by_sound = analyze_session_responses(
+                    data_session_dict, hit_source)
                 session_key = str(session_folder)
                 self.batch_performance_by_file[session_key] = single_session_performance
                 results_table = data_session_dict["ResultsTable"]
@@ -626,6 +624,10 @@ class ScanMediaFoldersApp:
                 correct = np.full(len(results_table), np.nan, dtype=float)
                 correct[trial_type == 1] = hit[trial_type == 1]
                 correct[trial_type == 2] = cr[trial_type == 2]
+                if 'DMTSOutcome' in results_table:
+                    outcome = results_table['DMTSOutcome']
+                    correct = np.where(outcome.isin(['Hit', 'Correct']), 1.,
+                                       np.where(outcome.isin(['Miss', 'FalseAlarm']), 0., np.nan))
                 self.batch_trial_performance_by_file[session_key] = {
                     "trial_type": trial_type,
                     "correct": correct,
@@ -733,10 +735,8 @@ class ScanMediaFoldersApp:
             single_session_performance = extract_performance(data_session_dict)
             
             print('extract_performance ok')
-            ir_events = detect_ir_events(data_session_dict["dataIR"]["full"])
-            trial_ir_analysis = analyze_ir_by_trial(data_session_dict, ir_events)
-            hit_by_sound_func = _get_hit_by_sound_func(hit_source)
-            hit_by_sound = hit_by_sound_func(data_session_dict, trial_ir_analysis)
+            ir_events, trial_ir_analysis, hit_by_sound = analyze_session_responses(
+                data_session_dict, hit_source)
             
             self.root.after(
                 0,
@@ -759,8 +759,8 @@ class ScanMediaFoldersApp:
         data_session_dict: dict,
         single_session_performance: dict,
         hit_by_sound: dict,
-        ir_events: dict,
-        trial_ir_analysis: dict,
+        ir_events: dict | None,
+        trial_ir_analysis: dict | None,
     ) -> None:
         
         self.session_target_folder = target_folder
@@ -771,13 +771,26 @@ class ScanMediaFoldersApp:
         self.single_session_trial_ir_analysis = trial_ir_analysis
 
         self._write_output('nTrials: ' + str(data_session_dict['nTotalTrials']) + '\n')
-        self._write_output(f"IR valid events: {len(ir_events['debut_fork'])}\n")
-        self._write_output(f"Analyzed trials (IRxTrial): {trial_ir_analysis['n_analyzed_trials']}\n")
-        self._write_output(f"Stay>={trial_ir_analysis['stay_threshold_ms']:g}ms at reward window "
-                           f"(percIRFork={trial_ir_analysis['perc_ir_fork']:g}%): "
-                           f"{trial_ir_analysis['pct_above_threshold']:.1f}%\n")
+        if trial_ir_analysis is not None:
+            self._write_output(f"IR valid events: {len(ir_events['debut_fork'])}\n")
+            self._write_output(f"Analyzed trials (IRxTrial): {trial_ir_analysis['n_analyzed_trials']}\n")
+            self._write_output(f"Stay>={trial_ir_analysis['stay_threshold_ms']:g}ms at reward window "
+                               f"(percIRFork={trial_ir_analysis['perc_ir_fork']:g}%): "
+                               f"{trial_ir_analysis['pct_above_threshold']:.1f}%\n")
+        elif 'dmts_analysis' in data_session_dict:
+            dmts = data_session_dict['dmts_analysis']
+            self._write_output(f"DMTS: dual-channel lick analysis; minimum {dmts['minimum']} lick(s).\n")
+            self._write_output(f"Match: {single_session_performance['n_go']}; nonmatch: {single_session_performance['n_nogo']}; blank: {single_session_performance['n_blank']}.\n")
+            self._write_output(f"Recalculated / saved outcome differences: {dmts['mismatch_count']}.\n")
+            if dmts['missing_channels']:
+                self._write_output("Missing channels: " + ', '.join(dmts['missing_channels']) + ".\n")
+            if dmts['saved_fallback_count']:
+                self._write_output(f"Using saved outcomes for {dmts['saved_fallback_count']} trials without complete dual-channel data.\n")
+            self._write_output("Trial timing uses recorded sound onset or coarse trial markers plus protocol durations.\n")
+        else:
+            self._write_output("Licks: counting signal events; IR occupancy analysis skipped.\n")
         if hit_by_sound:
-            self._write_output("Hit by SoundId:\n")
+            self._write_output("DMTS accuracy by test SoundId:\n" if 'dmts_analysis' in data_session_dict else "Hit by SoundId:\n")
             for sid, stats in hit_by_sound.items():
                 self._write_output(
                     f"  Sound {sid}: {stats['n_FAs']}/{stats['n_trials']} "
@@ -1318,6 +1331,8 @@ class ScanMediaFoldersApp:
         self.trial_viewer_window = None
 
     def _trial_count(self) -> int:
+        if 'dmts_analysis' in self.single_session_datadict:
+            return len(self.single_session_datadict['dmts_analysis']['trials'])
         data_trial_id = np.asarray(self.single_session_datadict["trialID"]["full"])
         return int((data_trial_id == 99).sum())
 
@@ -1531,12 +1546,16 @@ def _process_batch_session(
     batch_hit_by_sound: dict[int, dict],
 ) -> tuple[dict, dict]:
     single_session_performance = extract_performance(data_session_dict)
-    ir_events = detect_ir_events(data_session_dict["dataIR"]["full"])
-    trial_ir_analysis = analyze_ir_by_trial(data_session_dict, ir_events)
-    single_hit_by_sound = hit_by_sound_func(
-        data_session_dict,
-        trial_ir_analysis,
-    )
+    if 'dmts_analysis' in data_session_dict:
+        single_hit_by_sound = data_session_dict['dmts_analysis']['hit_by_sound']
+    else:
+        ir_events = detect_ir_events(data_session_dict["dataIR"]["full"])
+        trial_ir_analysis = (
+            analyze_lick_events_by_trial(data_session_dict, ir_events)
+            if hit_by_sound_func is extract_hit_by_sound_licks
+            else analyze_ir_by_trial(data_session_dict, ir_events)
+        )
+        single_hit_by_sound = hit_by_sound_func(data_session_dict, trial_ir_analysis)
     _append_trials_by_sound_id(
         trials_by_sound_id,
         data_session_dict,
@@ -1562,10 +1581,8 @@ def run_nogui(
     source_path = nwb_file if use_file else folder
 
     performance = extract_performance(session_data)
-    ir_events = detect_ir_events(session_data["dataIR"]["full"])
-    trial_ir_analysis = analyze_ir_by_trial(session_data, ir_events)
-    hit_by_sound_func = _get_hit_by_sound_func(hit_source)
-    hit_by_sound = hit_by_sound_func(session_data, trial_ir_analysis)
+    ir_events, trial_ir_analysis, hit_by_sound = analyze_session_responses(
+        session_data, hit_source)
 
     outdir.mkdir(parents=True, exist_ok=True)
     session_id = _safe_name(f"{source_path.parent.name}_{source_path.name}")

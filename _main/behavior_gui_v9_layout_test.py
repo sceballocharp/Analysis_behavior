@@ -63,7 +63,7 @@ def _get_plot_session_visualizations(force_agg: bool = False):
 class ScanMediaFoldersApp:
     def __init__(self, root, initial_folder: str | None = None, initial_file: str | None = None) -> None:
         self.root = root
-        self.root.title("BEHAVIOR v8")
+        self.root.title("BEHAVIOR v9 - layout test")
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         window_width = int(screen_width * 0.75)
@@ -161,7 +161,7 @@ class ScanMediaFoldersApp:
             return
         window = tk.Toplevel(self.root)
         self.guide_window = window
-        window.title("Getting started - BEHAVIOR v8")
+        window.title("Getting started - BEHAVIOR v9")
         window.geometry("740x680")
         window.minsize(480, 360)
         frame = ttk.Frame(window, padding=20)
@@ -225,9 +225,25 @@ class ScanMediaFoldersApp:
         )
         description_label.pack(anchor="w", pady=(4, 14))
 
-        notebook = ttk.Notebook(main_frame)
+        self.main_notebook = ttk.Notebook(main_frame)
+        self.main_notebook.pack(fill="both", expand=True, pady=(0, 8))
+        self.main_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.main_tab, text="Go/noGo")
+        self.dmts_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.dmts_tab, text="DMTS")
+
+        self.layout_split = ttk.Panedwindow(self.main_tab, orient="horizontal")
+        self.layout_split.pack(fill="both", expand=True)
+        controls_frame = ttk.Frame(self.layout_split, width=360, padding=(0, 8, 10, 0))
+        right_frame = ttk.Frame(self.layout_split, padding=(10, 8, 0, 0))
+        self.layout_split.add(controls_frame, weight=1)
+        self.layout_split.add(right_frame, weight=2)
+        self.root.after_idle(lambda: self.layout_split.sashpos(
+            0, int(self.layout_split.winfo_width() * 0.30)))
+
+        notebook = ttk.Notebook(controls_frame)
         self.notebook = notebook
-        notebook.pack(fill="x", pady=(0, 8))
+        notebook.pack(fill="x")
 
         input_tab = ttk.Frame(notebook, padding=10)
         meta_tab = ttk.Frame(notebook, padding=10)
@@ -237,7 +253,7 @@ class ScanMediaFoldersApp:
         self.groups_tab = ttk.Frame(notebook, padding=10)
         notebook.add(self.groups_tab, text="Groups")
         ttk.Button(self.groups_tab, text="Select PKL folder", command=self._load_group_folder).pack(anchor="w")
-        ttk.Label(self.groups_tab, textvariable=self.group_folder_var, wraplength=850).pack(anchor="w", pady=(6, 8))
+        ttk.Label(self.groups_tab, textvariable=self.group_folder_var, wraplength=300).pack(anchor="w", pady=(6, 8))
         group_list_frame = ttk.Frame(self.groups_tab)
         group_list_frame.pack(fill="x")
         self.group_file_list = ttk.Treeview(
@@ -246,22 +262,35 @@ class ScanMediaFoldersApp:
         for key, label, width in (("animal", "Animal", 120), ("file", "PKL file", 400),
                                   ("sessions", "Sessions", 90), ("trials", "Trials", 90), ("group", "Group", 140)):
             self.group_file_list.heading(key, text=label)
-            self.group_file_list.column(key, width=width)
+            self.group_file_list.column(key, width=width, stretch=False)
         group_scroll = ttk.Scrollbar(group_list_frame, orient="vertical", command=self.group_file_list.yview)
         self.group_file_list.configure(yscrollcommand=group_scroll.set)
-        self.group_file_list.pack(side="left", fill="both", expand=True)
-        group_scroll.pack(side="right", fill="y")
+        group_horizontal = ttk.Scrollbar(group_list_frame, orient="horizontal", command=self.group_file_list.xview)
+        self.group_file_list.configure(xscrollcommand=group_horizontal.set)
+        group_list_frame.columnconfigure(0, weight=1)
+        group_list_frame.rowconfigure(0, weight=1)
+        self.group_file_list.grid(row=0, column=0, sticky="nsew")
+        group_scroll.grid(row=0, column=1, sticky="ns")
+        group_horizontal.grid(row=1, column=0, sticky="ew")
         assignment_controls = ttk.Frame(self.groups_tab)
         assignment_controls.pack(fill="x", pady=(8, 0))
-        ttk.Label(assignment_controls, text="Group:").pack(side="left")
+        ttk.Label(assignment_controls, text="Group:").pack(anchor="w")
         self.group_name_selector = ttk.Combobox(assignment_controls, textvariable=self.group_name_var, width=20)
-        self.group_name_selector.pack(side="left", padx=6)
-        for label, command in (("Assign to group", self._assign_selected_group),
-                               ("Remove assignment", self._remove_selected_group),
-                               ("Save group assignments", self._save_group_assignments),
-                               ("Load group assignments", self._load_group_assignments)):
-            ttk.Button(assignment_controls, text=label, command=command).pack(side="left", padx=3)
-        ttk.Label(self.groups_tab, text="Select multiple files with Ctrl or Shift. Assignments are saved separately from PKL data.").pack(anchor="w", pady=(5, 0))
+        self.group_name_selector.pack(fill="x", pady=(3, 6))
+        group_actions = ttk.Frame(assignment_controls)
+        group_actions.pack(fill="x")
+        group_actions.columnconfigure((0, 1), weight=1, uniform="group_actions")
+        for index, (label, command) in enumerate((
+            ("Assign to group", self._assign_selected_group),
+            ("Remove assignment", self._remove_selected_group),
+            ("Save assignments", self._save_group_assignments),
+            ("Load assignments", self._load_group_assignments),
+        )):
+            ttk.Button(group_actions, text=label, command=command).grid(
+                row=index // 2, column=index % 2, sticky="ew",
+                padx=(0, 4) if index % 2 == 0 else (4, 0), pady=2,
+            )
+        ttk.Label(self.groups_tab, text="Select multiple files with Ctrl or Shift. Assignments are saved separately from PKL data.", wraplength=300).pack(anchor="w", pady=(5, 0))
         notebook.bind("<<NotebookTabChanged>>", lambda _event: self._draw_selected_input_box())
 
         ttk.Label(input_tab, text="Session input:").grid(
@@ -271,12 +300,12 @@ class ScanMediaFoldersApp:
         browse_button = ttk.Button(
             input_tab, text="Browse FOLDER", command=self._browse_folder
         )
-        browse_button.grid(row=0, column=1, padx=(0, 10))
+        browse_button.grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
         browse_button2 = ttk.Button(
             input_tab, text="Browse NWB", command=self._browse_nwb
         )
-        browse_button2.grid(row=0, column=2, padx=(0, 10))
+        browse_button2.grid(row=2, column=0, sticky="ew", pady=(6, 0))
 
         self.trial_viewer_button = ttk.Button(
             input_tab,
@@ -284,32 +313,33 @@ class ScanMediaFoldersApp:
             command=self._open_trial_viewer,
             state="disabled",
         )
-        self.trial_viewer_button.grid(row=0, column=3, padx=(10, 0))
+        self.trial_viewer_button.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        input_tab.columnconfigure(0, weight=1)
 
         ttk.Label(input_tab, text="Hit source:").grid(
-            row=1, column=0, sticky="w", pady=(10, 0), padx=(0, 10)
+            row=4, column=0, sticky="w", pady=(10, 0), padx=(0, 10)
         )
         ttk.Radiobutton(
             input_tab,
             text="IR",
             variable=self.hit_source_var,
             value="IR",
-        ).grid(row=1, column=1, sticky="w", pady=(10, 0))
+        ).grid(row=5, column=0, sticky="w", pady=(4, 0))
         ttk.Radiobutton(
             input_tab,
             text="Licks",
             variable=self.hit_source_var,
             value="Licks",
-        ).grid(row=1, column=2, sticky="w", pady=(10, 0))
+        ).grid(row=6, column=0, sticky="w", pady=(4, 0))
 
         ttk.Label(meta_tab, text="Animal name (override):").grid(
-            row=1, column=0, sticky="w", padx=(0, 10), pady=(10, 0)
+            row=2, column=0, sticky="w", pady=(10, 0)
         )
         animal_entry = ttk.Entry(meta_tab, textvariable=self.animal_var, width=30)
-        animal_entry.grid(row=1, column=1, sticky="ew", pady=(10, 0))
+        animal_entry.grid(row=3, column=0, sticky="ew", pady=(4, 0))
         animal_entry.bind("<Return>", self._search_nwb_animal_override)
         ttk.Button(meta_tab, text="Search name", command=self._search_nwb_animal_override).grid(
-            row=1, column=2, padx=(10, 0), pady=(10, 0)
+            row=4, column=0, sticky="ew", pady=(6, 0)
         )
         search_buttons = ttk.Frame(meta_tab)
         search_buttons.grid(row=0, column=0, sticky="w")
@@ -320,52 +350,36 @@ class ScanMediaFoldersApp:
             search_buttons, text="Find folders", command=self._find_session_folders_for_animal,
         ).pack(side="left", padx=(8, 0))
         detected_animal_frame = ttk.Frame(meta_tab)
-        detected_animal_frame.grid(row=0, column=1, sticky="ew", padx=(10, 0))
-        ttk.Label(detected_animal_frame, text="Detected animal:").pack(side="left", padx=(0, 8))
+        detected_animal_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        ttk.Label(detected_animal_frame, text="Detected animal:").pack(anchor="w")
         self.nwb_group_selector = ttk.Combobox(
             detected_animal_frame, textvariable=self.nwb_group_var, state="readonly", width=30,
         )
         self.nwb_group_selector.pack(side="left", fill="x", expand=True)
         self.nwb_group_selector.bind("<<ComboboxSelected>>", self._select_nwb_group)
-        meta_tab.columnconfigure(1, weight=1)
+        meta_tab.columnconfigure(0, weight=1)
 
-        ttk.Label(main_frame, text="Current session folder:").pack(anchor="w", pady=(8, 0))
+        ttk.Label(controls_frame, text="Current session folder:").pack(anchor="w", pady=(8, 0))
         current_folder_label = ttk.Label(
-            main_frame,
+            controls_frame,
             textvariable=self.current_folder_var,
-            wraplength=860,
+            wraplength=300,
         )
         current_folder_label.pack(anchor="w")
 
-        status_frame = ttk.Frame(main_frame)
+        status_frame = ttk.Frame(controls_frame)
         status_frame.pack(fill="x", pady=(12, 10))
         ttk.Label(status_frame, text="Status:").pack(side="left")
-        ttk.Label(status_frame, textvariable=self.status_var).pack(side="left", padx=(6, 0))
+        ttk.Label(status_frame, textvariable=self.status_var, wraplength=260).pack(side="left", padx=(6, 0))
         
-        # --- Bottom split: output text (left) + plot (right) ---
-        bottom_frame = ttk.Frame(main_frame)
-        bottom_frame.pack(fill="both", expand=True, pady=(6, 0))
-        bottom_frame.columnconfigure(0, weight=1)
-        bottom_frame.columnconfigure(1, weight=1)
-        bottom_frame.rowconfigure(1, weight=1)  # row 1 = the content row
-
-        # Labels in row 0
-        ttk.Label(bottom_frame, text="Output").grid(row=0, column=0, sticky="w")
-        ttk.Label(bottom_frame, text="Plot").grid(row=0, column=1, sticky="w")
-
-        # Scrolled text in row 1, column 0
+        ttk.Label(controls_frame, text="Output").pack(anchor="w")
         self.output_text = scrolledtext.ScrolledText(
-            bottom_frame,
-            wrap="word",
-            height=20,
+            controls_frame, wrap="word", width=32, height=6,
             font=("Consolas", 10),
         )
-        self.output_text.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        self.output_text.pack(fill="both", expand=True, pady=(4, 0))
         self.output_text.configure(state="disabled")
-        
-        # Right: blank matplotlib canvas for v8 layout work
-        right_frame = ttk.Frame(bottom_frame)
-        right_frame.grid(row=1, column=1, sticky="nsew")
+        ttk.Label(right_frame, text="Plot").pack(anchor="w")
 
         self.main_canvas_figure = Figure(figsize=(6.5, 4.2), dpi=100)
         self.main_canvas_ax = self.main_canvas_figure.add_subplot(1, 1, 1)
@@ -382,6 +396,40 @@ class ScanMediaFoldersApp:
         )
         self.main_canvas.draw()
         self.main_canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        # Debounce geometry events so divider drags produce readable console output.
+        self._layout_report_job = None
+        self._last_layout_sizes = None
+        self.root.bind("<Configure>", self._queue_layout_size_report, add="+")
+        self.layout_split.bind("<Configure>", self._queue_layout_size_report, add="+")
+        controls_frame.bind("<Configure>", self._queue_layout_size_report, add="+")
+        right_frame.bind("<Configure>", self._queue_layout_size_report, add="+")
+        self.layout_split.bind("<ButtonRelease-1>", self._queue_layout_size_report, add="+")
+        self._queue_layout_size_report()
+
+    def _queue_layout_size_report(self, _event=None) -> None:
+        if self._layout_report_job is not None:
+            self.root.after_cancel(self._layout_report_job)
+        self._layout_report_job = self.root.after(150, self._print_layout_sizes)
+
+    def _print_layout_sizes(self) -> None:
+        self._layout_report_job = None
+        if not self.layout_split.winfo_ismapped():
+            return
+        panels = [self.root.nametowidget(name) for name in self.layout_split.panes()]
+        widgets = [self.root, self.layout_split, *panels, self.main_canvas.get_tk_widget()]
+        sizes = tuple((widget.winfo_width(), widget.winfo_height()) for widget in widgets)
+        if sizes == self._last_layout_sizes:
+            return
+        self._last_layout_sizes = sizes
+        panel_width = sum(width for width, _height in sizes[2:4])
+        parts = []
+        for index, (label, (width, height)) in enumerate(zip(
+            ("GUI", "Resizable area", "Left controls", "Right plot panel", "Canvas"), sizes
+        )):
+            share = f" ({width / panel_width:.1%})" if index in (2, 3) and panel_width else ""
+            parts.append(f"{label}: {width} x {height} px{share}")
+        print("[Layout] " + " | ".join(parts), flush=True)
 
     def _reset_session(self) -> None:
         # Ignore any worker results belonging to the previous selection.
@@ -2202,3 +2250,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

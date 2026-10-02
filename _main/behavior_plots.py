@@ -250,11 +250,146 @@ def plot_performance(perf_data, info_data, trial_ir_analysis=None, show=True, bl
         plt.show(block=block)
     return fig
 
+def batch_rolling_trial_data(performance_by_file, trial_performance_by_file, window=25):
+    """Return plot-ordered trial data and trailing-window percentages for export."""
+    if not isinstance(window, int) or window < 1:
+        raise ValueError("window must be a positive integer")
+    session_keys, local_indices, types, correct = [], [], [], []
+    for key, performance in sorted(performance_by_file.items(),
+            key=lambda item: _natural_sort_key(Path(item[0]).stem or str(item[0]))):
+        if not isinstance(performance, dict) or "error" in performance:
+            continue
+        data = (trial_performance_by_file or {}).get(key, {})
+        trial_types = np.asarray(data.get("trial_type", []), dtype=float)
+        outcomes = np.asarray(data.get("correct", []), dtype=float)
+        n = min(len(trial_types), len(outcomes))
+        session_keys.extend([str(key)] * n)
+        local_indices.extend(range(n))
+        types.extend(trial_types[:n])
+        correct.extend(outcomes[:n])
+    types, correct = np.asarray(types), np.asarray(correct)
+    def rolling(category):
+        valid = (types == category) & np.isfinite(correct)
+        sums = np.r_[0., np.cumsum(np.where(valid, correct, 0.))]
+        counts = np.r_[0, np.cumsum(valid)]
+        ends = np.arange(1, len(correct) + 1)
+        starts = np.maximum(0, ends - window)
+        n = counts[ends] - counts[starts]
+        return np.divide(100 * (sums[ends] - sums[starts]), n,
+                         out=np.full(len(correct), np.nan), where=n > 0)
+    go, nogo = rolling(1), rolling(2)
+    available = np.isfinite(go).astype(int) + np.isfinite(nogo).astype(int)
+    total = np.divide(np.nan_to_num(go) + np.nan_to_num(nogo), available,
+                      out=np.full(len(correct), np.nan), where=available > 0)
+    return dict(window_trials=window, window_alignment="trailing, includes current trial",
+                crosses_session_boundaries=True, initial_windows="use available trials",
+                total_definition="mean of available Go and NoGo percentages",
+                index_base=0, trial_index=np.arange(len(correct)),
+                session_key=np.asarray(session_keys, dtype=str),
+                trial_index_in_session=np.asarray(local_indices, dtype=int),
+                trial_type=types, correct=correct,
+                go_pct=go, nogo_pct=nogo, total_pct=total)
+
+
+def group_animal_curves(exports, assignments):
+    """Average duplicate-animal exports first; align by zero-based trial index."""
+    grouped = {}
+    animal_groups = {}
+    for key, payload in exports.items():
+        group = assignments.get(key)
+        if not group:
+            continue
+        animal = str(payload.get("animal_name", "")).strip()
+        if not animal:
+            raise ValueError(f"Missing animal name in {Path(key).name}")
+        identity = animal.casefold()
+        if identity in animal_groups and animal_groups[identity] != group:
+            raise ValueError(f"Animal {animal} is assigned to more than one group.")
+        animal_groups[identity] = group
+        rolling = payload["rolling_trial_data"]
+        if rolling.get("window_trials") != 25:
+            raise ValueError(f"{Path(key).name} does not contain 25-trial rolling averages.")
+        x = np.asarray(rolling["trial_index"])
+        if x.ndim != 1 or not np.array_equal(x, np.arange(len(x))):
+            raise ValueError(f"Unexpected trial indices in {Path(key).name}")
+        curves = {}
+        for metric in ("go_pct", "nogo_pct", "total_pct"):
+            values = np.asarray(rolling[metric], dtype=float)
+            if values.shape != x.shape:
+                raise ValueError(f"Invalid {metric} length in {Path(key).name}")
+            curves[metric] = values
+        if len(x):
+            grouped.setdefault(group, {}).setdefault(identity, []).append(curves)
+    return {group: {animal: {metric: _mean_aligned_curves([c[metric] for c in files])
+                            for metric in ("go_pct", "nogo_pct", "total_pct")}
+                    for animal, files in animals.items()}
+            for group, animals in grouped.items()}
+
+
+def _mean_aligned_curves(curves):
+    length = max((len(curve) for curve in curves), default=0)
+    sums = np.zeros(length)
+    counts = np.zeros(length)
+    for curve in curves:
+        valid = np.isfinite(curve)
+        sums[:len(curve)] += np.where(valid, curve, 0.)
+        counts[:len(curve)] += valid
+    return np.divide(sums, counts, out=np.full(length, np.nan), where=counts > 0)
+
+
+def plot_group_average_performance(exports, assignments, plot_layout=None, show=True, block=False):
+    groups = group_animal_curves(exports, assignments)
+    if not groups:
+        return None
+    layout = plot_layout if isinstance(plot_layout, dict) else {}
+    def positive(key, default):
+        try:
+            value = float(layout.get(key, default))
+            return value if np.isfinite(value) and value > 0 else default
+        except (TypeError, ValueError):
+            return default
+    dpi = positive("dpi", 100)
+    fig = plt.figure(
+        figsize=(3 * positive("subplot_width_px", 1000) / dpi,
+                 2 * positive("subplot_height_px", 300) / dpi), dpi=dpi)
+    grid = fig.add_gridspec(2, 3)
+    ax_go = fig.add_subplot(grid[0, 0])
+    ax_nogo = fig.add_subplot(grid[1, 0], sharex=ax_go)
+    ax_total = fig.add_subplot(grid[:, 1:], sharex=ax_go)
+    axes = (ax_go, ax_nogo, ax_total)
+    colors = plt.get_cmap("tab10")
+    for ax, metric, title in zip(axes, ("go_pct", "nogo_pct", "total_pct"), ("Go", "NoGo", "Total")):
+        individual_label = True
+        for index, (group, animals) in enumerate(sorted(groups.items())):
+            curves = [animal[metric] for animal in animals.values()]
+            for curve in curves:
+                ax.plot(np.arange(len(curve)), curve, color="0.65", lw=0.7, alpha=0.6,
+                        label="Individual animals" if individual_label else "_nolegend_", zorder=1)
+                individual_label = False
+            mean = _mean_aligned_curves(curves)
+            ax.plot(np.arange(len(mean)), mean, lw=2.5, color=colors(index % 10),
+                    label=f"{group} (n={len(animals)} animals)", zorder=3)
+        ax.set_title(f"{title} - 25-trial rolling performance", loc="left", fontweight="bold")
+        ax.set_ylabel("Performance (%)")
+        ax.set_ylim(-5, 105)
+        ax.grid(axis="y", alpha=0.25)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.legend(frameon=False, fontsize=8)
+    ax_go.tick_params(axis="x", labelbottom=False)
+    ax_nogo.set_xlabel("Cumulative trial index (0-based)")
+    ax_total.set_xlabel("Cumulative trial index (0-based); available animals averaged at each trial")
+    fig.tight_layout()
+    if show:
+        plt.show(block=block)
+    return fig
+
+
 def plot_batch_session_performance(
     performance_by_file,
     trial_performance_by_file=None,
     show=True,
     block=False,
+    plot_layout=None,
 ):
     """
     Plot Go, NoGo, and total performance across sessions from a batch GUI run.
@@ -282,18 +417,30 @@ def plot_batch_session_performance(
     if not session_labels:
         return None
 
+    layout = plot_layout if isinstance(plot_layout, dict) else {}
+    def positive_setting(key, default):
+        try:
+            value = float(layout.get(key, default))
+            return value if np.isfinite(value) and value > 0 else default
+        except (TypeError, ValueError):
+            return default
+    dpi = positive_setting("dpi", 100)
+    width_px = positive_setting("subplot_width_px", 1000)
+    height_px = positive_setting("subplot_height_px", 300)
+    # Each subplot allocation includes its labels, margins, and spacing.
     x = np.arange(len(session_labels))
     if trial_performance_by_file:
         fig, axes = plt.subplots(
-            2,
+            3,
             1,
-            figsize=(10, 7.2),
-            gridspec_kw={"height_ratios": [1.0, 1.25]},
+            figsize=(width_px / dpi, 3 * height_px / dpi),
+            dpi=dpi,
+            gridspec_kw={"height_ratios": [1.0, 1.0, 1.0]},
         )
-        ax = axes[0]
-        ax_trials = axes[1]
+        ax_trials, ax_rolling, ax = axes
+        ax_rolling.sharex(ax_trials)
     else:
-        fig, ax = plt.subplots(figsize=(9.5, 4.6))
+        fig, ax = plt.subplots(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
         ax_trials = None
     ax.plot(x, go_values, marker="o", color="b", lw=1.8, label="Go")
     ax.plot(x, nogo_values, marker="o", color="r", lw=1.8, label="NoGo")
@@ -368,8 +515,16 @@ def plot_batch_session_performance(
                 alpha=0.75,
                 label="NoGo",
             )
+            rolling_data = batch_rolling_trial_data(performance_by_file, trial_performance_by_file)
+            rolling_go = rolling_data["go_pct"]
+            rolling_nogo = rolling_data["nogo_pct"]
+            rolling_total = rolling_data["total_pct"]
+            ax_rolling.plot(all_x, rolling_go, color="b", lw=1.5, label="Go")
+            ax_rolling.plot(all_x, rolling_nogo, color="r", lw=1.5, label="NoGo")
+            ax_rolling.plot(all_x, rolling_total, color="k", lw=1.8, label="Total")
             for boundary in session_boundaries:
                 ax_trials.axvline(boundary, color="gray", ls="--", lw=1, alpha=0.55)
+                ax_rolling.axvline(boundary, color="gray", ls="--", lw=1, alpha=0.55)
             ax_trials.set_xticks(session_centers)
             ax_trials.set_xticklabels(trial_session_labels, rotation=45, ha="right")
             ax_trials.set_xlim(-1, max(all_x) + 1)
@@ -382,6 +537,21 @@ def plot_batch_session_performance(
                 va="center",
                 transform=ax_trials.transAxes,
             )
+
+        ax_rolling.set_title("Rolling performance - trailing 25 trials", fontsize=12, fontweight="bold", loc="left")
+        ax_rolling.set_xlabel("Trials across sessions (initial windows use available trials)")
+        ax_rolling.set_ylabel("Performance (%)")
+        ax_rolling.set_ylim(-10, 110)
+        ax_rolling.set_yticks([0, 50, 100])
+        ax_rolling.tick_params(axis="x", labelrotation=45)
+        ax_rolling.grid(True, axis="y", color="#E1E1E1", linewidth=0.7)
+        ax_rolling.spines["top"].set_visible(False)
+        ax_rolling.spines["right"].set_visible(False)
+        if all_x:
+            ax_rolling.legend(frameon=False)
+        else:
+            ax_rolling.text(0.5, 0.5, "No trial-level performance data",
+                            ha="center", va="center", transform=ax_rolling.transAxes)
 
         ax_trials.set_title("Trial-by-trial performance", fontsize=12, fontweight="bold", loc="left")
         ax_trials.set_xlabel("Trials across sessions")

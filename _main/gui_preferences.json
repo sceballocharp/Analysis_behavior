@@ -1,0 +1,9 @@
+{
+  "show_guide_at_startup": false,
+  "default_nwb_folder": "Y:\\Data\\Behavior\\BASIL_NWB\\",
+  "plot_layout": {
+    "subplot_width_px": 500,
+    "subplot_height_px": 300,
+    "dpi": 100
+  }
+}

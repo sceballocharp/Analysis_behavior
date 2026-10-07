@@ -157,14 +157,24 @@ def _format_trial_ir_times(trial_ir_analysis, trial_index):
 # Performance plots
 # -----------------------------------------------------------------------------
 
-def plot_performance(perf_data, info_data, trial_ir_analysis=None, show=True, block=False):
+def plot_performance(perf_data, info_data, trial_ir_analysis=None, show=True, block=False, plot_layout=None):
+    layout = plot_layout if isinstance(plot_layout, dict) else {}
+    def positive_setting(key, default):
+        try:
+            value = float(layout.get(key, default))
+            return value if np.isfinite(value) and value > 0 else default
+        except (TypeError, ValueError):
+            return default
+    dpi = positive_setting("dpi", 100)
+    width_px = positive_setting("subplot_width_px", 500)
+    height_px = positive_setting("subplot_height_px", 300)
     has_trial_ir = trial_ir_analysis is not None and "dict_data_IRxTrial" in trial_ir_analysis
     if has_trial_ir:
-        fig, axes = plt.subplots(1, 2, figsize=(9.5, 4.2), gridspec_kw={"width_ratios": [1, 1.2]})
+        fig, axes = plt.subplots(1, 2, figsize=(2 * width_px / dpi, height_px / dpi), dpi=dpi)
         ax = axes[0]
         ax_time = axes[1]
     else:
-        fig = plt.figure()
+        fig = plt.figure(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
         ax = fig.add_subplot(111)
     ax.set_title("Waiting for data...")
     ax.set_xlabel("Session")
@@ -757,7 +767,7 @@ def plot_trial_ir_and_sound(
         plt.show(block=block)
     return fig
 
-def plot_ir_occupancy_by_sound(data_session_dict, trial_ir_analysis, show=True, block=False):
+def plot_ir_occupancy_by_sound(data_session_dict, trial_ir_analysis, show=True, block=False, plot_layout=None):
     if trial_ir_analysis is None:
         return None
     viz_visits = trial_ir_analysis["viz_visits"]
@@ -765,6 +775,16 @@ def plot_ir_occupancy_by_sound(data_session_dict, trial_ir_analysis, show=True, 
         return None
     x_label = trial_ir_analysis.get("occupancy_x_label", "Time (samples; 1000 = RW start)")
     plot_title = trial_ir_analysis.get("occupancy_title", "IR occupancy aligned to reward window")
+    layout = plot_layout if isinstance(plot_layout, dict) else {}
+    def positive_setting(key, default):
+        try:
+            value = float(layout.get(key, default))
+            return value if np.isfinite(value) and value > 0 else default
+        except (TypeError, ValueError):
+            return default
+    dpi = positive_setting("dpi", 100)
+    width_px = positive_setting("subplot_width_px", 600)
+    height_px = positive_setting("subplot_height_px", 400)
 
     def _add_trial_lines(ax, viz_data):
         if viz_data.size == 0:
@@ -805,7 +825,8 @@ def plot_ir_occupancy_by_sound(data_session_dict, trial_ir_analysis, show=True, 
         fig, axes = plt.subplots(
             2,
             2,
-            figsize=(12, 8),
+            figsize=(2 * width_px / dpi, 2 * height_px / dpi),
+            dpi=dpi,
             gridspec_kw={"height_ratios": [3, 1]},
         )
 
@@ -911,7 +932,7 @@ def plot_ir_occupancy_by_sound(data_session_dict, trial_ir_analysis, show=True, 
             plt.show(block=block)
         return fig
 
-    fig = plt.figure()
+    fig = plt.figure(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
     ax_hm = fig.add_subplot(1, 1, 1)
     ax_hm.imshow(viz_visits, aspect="auto", interpolation="nearest", cmap="Greys")
     _add_trial_lines(ax_hm, viz_visits)

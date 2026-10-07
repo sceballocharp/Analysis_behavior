@@ -165,13 +165,22 @@ def plot_dmts_trial(session, trial_index=0, show=True, block=False):
             for event in trial['events'][side]:
                 ax.axvline(event - start, color=color, alpha=.5, lw=.8)
         ax.set_ylabel(side + ' lick (V)')
-    for ax, name in zip(axes[2:], ('SoundCopy', 'Reward')):
+    for ax, name in zip(axes[2:], ('WhichSound', 'Reward')):
         signal = session['signals'].get(name)
         if signal is not None:
             times = signal_times(signal)
             mask = (times >= start - .5) & (times <= trial['response_end'] + .5)
-            ax.plot(times[mask] - start, np.asarray(signal['data'])[mask], color='#555555', lw=.8)
-        ax.set_ylabel('Sound' if name == 'SoundCopy' else 'Reward')
+            if name == 'WhichSound':
+                ax.step(times[mask] - start, np.asarray(signal['data'])[mask],
+                        where='post', color='#2F6F9F', lw=1.2)
+            else:
+                ax.plot(times[mask] - start, np.asarray(signal['data'])[mask], color='#555555', lw=.8)
+        elif name == 'WhichSound':
+            ax.text(.5, .5, 'WhichSound channel not recorded', transform=ax.transAxes, ha='center')
+        ax.set_ylabel('Sound ID\n(WhichSound)' if name == 'WhichSound' else 'Reward')
+        if name == 'WhichSound':
+            from matplotlib.ticker import MaxNLocator
+            ax.yaxis.set_major_locator(MaxNLocator(integer=True))
     p = parameters(session)
     duration = float(p.get('SoundDuration_s', p.get('sound_duration_s')))
     for ax in axes:

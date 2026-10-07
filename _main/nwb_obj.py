@@ -238,6 +238,9 @@ class session_data_nwb():
     
     def get_parameters(self):
         with h5py.File(self.nwb_path, "r") as h5f:
+            start_value = h5f['session_start_time'][()] if 'session_start_time' in h5f else None
+            self.session_start_time = (start_value.decode('utf-8') if isinstance(start_value, bytes)
+                                       else str(start_value) if start_value is not None else None)
 
             date_raw = h5f['file_create_date'][:]
             date_string_full = date_raw[0].decode('utf-8')

@@ -235,6 +235,7 @@ def load_session_data_fromFile(session_data_nwbFile):
         data_ir = nwbOjb.IR_signal
         return {
             "parameters": nwbOjb.parameters,
+            "session_start_time": nwbOjb.session_start_time,
             "signals": nwbOjb.signals,
             "dataIR": {
                 "full": data_ir,

@@ -3,7 +3,7 @@
   "default_nwb_folder": "Y:\\Data\\Behavior\\BASIL_NWB\\",
   "plot_layout": {
     "subplot_width_px": 500,
-    "subplot_height_px": 300,
+    "subplot_height_px": 400,
     "dpi": 100
   }
 }

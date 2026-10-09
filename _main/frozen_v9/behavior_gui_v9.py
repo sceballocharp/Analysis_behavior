@@ -92,6 +92,7 @@ class ScanMediaFoldersApp:
         self.file_var = tk.StringVar(value=file_startup_value)
         self.animal_var = tk.StringVar(value=animal_startup_value)
         self.hit_source_var = tk.StringVar(value="IR")
+        self.hit_source_status_var = tk.StringVar(value="Select an NWB file to detect its hit source.")
         self.active_input = "folder"
         self._single_input_selected = False
         self.nwb_groups: dict[str, list[Path]] = {}
@@ -321,15 +322,18 @@ class ScanMediaFoldersApp:
             row=0, column=0, sticky="w", padx=(0, 10)
         )
 
+        browse_row = ttk.Frame(input_tab)
+        browse_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        browse_row.columnconfigure((0, 1), weight=1, uniform="browse")
         browse_button = ttk.Button(
-            input_tab, text="Browse FOLDER", command=self._browse_folder
+            browse_row, text="Browse FOLDER", command=self._browse_folder
         )
-        browse_button.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        browse_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
         browse_button2 = ttk.Button(
-            input_tab, text="Browse NWB", command=self._browse_nwb
+            browse_row, text="Browse NWB", command=self._browse_nwb
         )
-        browse_button2.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        browse_button2.grid(row=0, column=0, sticky="ew", padx=(0, 4))
 
         self.trial_viewer_button = ttk.Button(
             input_tab,
@@ -348,13 +352,17 @@ class ScanMediaFoldersApp:
             text="IR",
             variable=self.hit_source_var,
             value="IR",
+            command=self._manual_hit_source,
         ).grid(row=5, column=0, sticky="w", pady=(4, 0))
         ttk.Radiobutton(
             input_tab,
             text="Licks",
             variable=self.hit_source_var,
             value="Licks",
+            command=self._manual_hit_source,
         ).grid(row=6, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(input_tab, textvariable=self.hit_source_status_var, wraplength=300).grid(
+            row=7, column=0, sticky="w", pady=(6, 0))
 
         ttk.Label(meta_tab, text="Animal name (override):").grid(
             row=2, column=0, sticky="w", pady=(10, 0)
@@ -421,6 +429,8 @@ class ScanMediaFoldersApp:
         self.main_canvas.draw()
         self.main_canvas.get_tk_widget().pack(fill="both", expand=True)
 
+        self.dmts_file_notebook = ttk.Notebook(self.dmts_tab, height=0)
+        self.dmts_file_notebook.pack(fill="x")
         self.dmts_layout_split = ttk.Panedwindow(self.dmts_tab, orient="horizontal")
         self.dmts_layout_split.pack(fill="both", expand=True)
         dmts_controls = ttk.Frame(self.dmts_layout_split, width=360, padding=(0, 8, 10, 0))
@@ -429,32 +439,39 @@ class ScanMediaFoldersApp:
         self.dmts_layout_split.add(dmts_plot, weight=3)
         self._dmts_initial_split_pending = True
         self.dmts_file_var = tk.StringVar(value="")
+        self._dmts_loaded = False
+        self._dmts_session = None
+        self._dmts_loaded_signals = None
         self._dmts_file_actions = set()
         self._dmts_file_busy = False
         self._dmts_export_ready = False
         self.dmts_example_var = tk.StringVar(value="")
         self.dmts_viewer_window = None
-        self.dmts_file_notebook = ttk.Notebook(dmts_controls)
-        self.dmts_file_notebook.pack(fill="x")
-        dmts_file_tab = ttk.Frame(self.dmts_file_notebook, padding=10)
-        self.dmts_file_notebook.add(dmts_file_tab, text="File")
-        dmts_animal_tab = ttk.Frame(self.dmts_file_notebook, padding=10)
-        self.dmts_animal_tab = dmts_animal_tab
+        dmts_file_page = ttk.Frame(self.dmts_file_notebook)
+        self.dmts_file_notebook.add(dmts_file_page, text="File")
+        self.dmts_animal_tab = ttk.Frame(self.dmts_file_notebook)
+        self.dmts_file_notebook.add(self.dmts_animal_tab, text="Animal")
+        dmts_file_tab = ttk.Frame(dmts_controls, padding=10)
+        dmts_animal_tab = ttk.Frame(dmts_controls, padding=10)
         self.dmts_batch_results = []
         self.dmts_batch_errors = []
         self._dmts_batch_running = False
         self._dmts_batch_generation = 0
-        self.dmts_file_notebook.add(dmts_animal_tab, text="Animal")
-        self.dmts_groups_tab = ttk.Frame(self.dmts_file_notebook, padding=10)
+        self.dmts_groups_tab = ttk.Frame(self.dmts_file_notebook)
         self.dmts_file_notebook.add(self.dmts_groups_tab, text="Groups")
+        dmts_groups_controls = ttk.Frame(dmts_controls, padding=10)
+        dmts_panels = {str(dmts_file_page): dmts_file_tab,
+                       str(self.dmts_animal_tab): dmts_animal_tab,
+                       str(self.dmts_groups_tab): dmts_groups_controls}
+        dmts_file_tab.pack(fill="x")
         self.dmts_group_exports = {}
         self.dmts_group_assignments = {}
         self.dmts_group_folder_var = tk.StringVar(value="No PKL folder selected")
         self.dmts_group_name_var = tk.StringVar(value="All files")
         self.dmts_groups_engaged_var = tk.BooleanVar(value=False)
-        ttk.Button(self.dmts_groups_tab, text="Select PKL folder", command=self._load_dmts_groups).pack(anchor="w")
-        ttk.Label(self.dmts_groups_tab, textvariable=self.dmts_group_folder_var, wraplength=300).pack(anchor="w", pady=6)
-        table_frame = ttk.Frame(self.dmts_groups_tab)
+        ttk.Button(dmts_groups_controls, text="Select PKL folder", command=self._load_dmts_groups).pack(anchor="w")
+        ttk.Label(dmts_groups_controls, textvariable=self.dmts_group_folder_var, wraplength=300).pack(anchor="w", pady=6)
+        table_frame = ttk.Frame(dmts_groups_controls)
         table_frame.pack(fill="both", expand=True)
         self.dmts_group_table = ttk.Treeview(table_frame, columns=("file", "sessions", "group"),
                                              show="headings", height=9, selectmode="extended")
@@ -469,11 +486,11 @@ class ScanMediaFoldersApp:
         scroll_y.grid(row=0, column=1, sticky="ns")
         scroll_x.grid(row=1, column=0, sticky="ew")
         self.dmts_group_table.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
-        ttk.Label(self.dmts_groups_tab, text="Group for selected files:").pack(anchor="w", pady=(8, 0))
-        ttk.Entry(self.dmts_groups_tab, textvariable=self.dmts_group_name_var).pack(fill="x")
-        ttk.Button(self.dmts_groups_tab, text="Assign to group", command=self._assign_dmts_group).pack(fill="x", pady=4)
-        ttk.Checkbutton(self.dmts_groups_tab, text="Engaged-only curves", variable=self.dmts_groups_engaged_var).pack(anchor="w")
-        ttk.Label(self.dmts_groups_tab, text="All files are included. Ctrl/Shift selects files for assignment. Each PKL has equal weight.", wraplength=300).pack(anchor="w")
+        ttk.Label(dmts_groups_controls, text="Group for selected files:").pack(anchor="w", pady=(8, 0))
+        ttk.Entry(dmts_groups_controls, textvariable=self.dmts_group_name_var).pack(fill="x")
+        ttk.Button(dmts_groups_controls, text="Assign to group", command=self._assign_dmts_group).pack(fill="x", pady=4)
+        ttk.Checkbutton(dmts_groups_controls, text="Engaged-only curves", variable=self.dmts_groups_engaged_var).pack(anchor="w")
+        ttk.Label(dmts_groups_controls, text="All files are included. Ctrl/Shift selects files for assignment. Each PKL has equal weight.", wraplength=300).pack(anchor="w")
         self.dmts_mouse_folder_var = tk.StringVar(value="No mouse folder selected")
         self.dmts_scan_status_var = tk.StringVar(value="Choose a mouse folder")
         self.dmts_silent_match_var = tk.StringVar(value="5")
@@ -493,19 +510,29 @@ class ScanMediaFoldersApp:
         self.dmts_animal_output = scrolledtext.ScrolledText(
             dmts_animal_tab, wrap="word", width=32, height=12, font=("Consolas", 10), state="disabled")
         self.dmts_animal_output.pack(fill="both", expand=True)
-        ttk.Label(dmts_file_tab, text="Session input:").pack(anchor="w")
-        ttk.Button(dmts_file_tab, text="Browse NWB", command=self._browse_dmts_nwb).pack(fill="x", pady=(6, 0))
-        ttk.Label(dmts_file_tab, text="Examples:").pack(anchor="w", pady=(6, 0))
-        examples = ttk.Combobox(dmts_file_tab, textvariable=self.dmts_example_var,
+        self.dmts_file_inner_notebook = ttk.Notebook(dmts_file_tab)
+        self.dmts_file_inner_notebook.pack(fill="both", expand=True)
+        dmts_file_main = ttk.Frame(self.dmts_file_inner_notebook, padding=8)
+        dmts_plot_settings = ttk.Frame(self.dmts_file_inner_notebook, padding=8)
+        self.dmts_file_inner_notebook.add(dmts_file_main, text="Main")
+        self.dmts_file_inner_notebook.add(dmts_plot_settings, text="Plot settings")
+        ttk.Label(dmts_file_main, text="Session input:").pack(anchor="w")
+        ttk.Button(dmts_file_main, text="Browse NWB", command=self._browse_dmts_nwb).pack(fill="x", pady=(6, 0))
+        ttk.Label(dmts_file_main, text="Examples:").pack(anchor="w", pady=(6, 0))
+        examples = ttk.Combobox(dmts_file_main, textvariable=self.dmts_example_var,
                                values=("", "Pretraining recording", "MatchOnly recording"), state="readonly")
         examples.pack(fill="x", pady=(3, 6))
         examples.bind("<<ComboboxSelected>>", self._select_dmts_example)
         self.dmts_trial_viewer_button = ttk.Button(
-            dmts_file_tab, text="Trial Viewer", command=self._open_dmts_trial_viewer, state="disabled")
+            dmts_file_main, text="Trial Viewer", command=self._open_dmts_trial_viewer, state="disabled")
         self.dmts_trial_viewer_button.pack(fill="x", pady=(6, 0))
-        ttk.Label(dmts_file_tab, textvariable=self.dmts_file_var, wraplength=300).pack(
+        ttk.Label(dmts_file_main, textvariable=self.dmts_file_var, wraplength=300).pack(
             anchor="w", pady=(6, 0))
-        pretraining_settings = ttk.LabelFrame(dmts_controls, text="Plot Time Window settings", padding=10)
+        ttk.Label(dmts_file_main, text="Output").pack(anchor="w", pady=(10, 4))
+        self.dmts_file_output = scrolledtext.ScrolledText(
+            dmts_file_main, wrap="word", width=32, height=8, font=("Consolas", 10), state="disabled")
+        self.dmts_file_output.pack(fill="both", expand=True)
+        pretraining_settings = ttk.LabelFrame(dmts_plot_settings, text="Plot Time Window settings", padding=10)
         pretraining_settings.pack(fill="x", pady=(12, 0))
         self.pretraining_vars = {}
         for row, (key, label, default) in enumerate((
@@ -519,7 +546,7 @@ class ScanMediaFoldersApp:
             ttk.Entry(pretraining_settings, textvariable=self.pretraining_vars[key], width=10).grid(
                 row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
         pretraining_settings.columnconfigure(1, weight=1)
-        match_settings = ttk.LabelFrame(dmts_controls, text="Plot Trial-Aligned Licks settings", padding=10)
+        match_settings = ttk.LabelFrame(dmts_plot_settings, text="Plot Trial-Aligned Licks settings", padding=10)
         match_settings.pack(fill="x", pady=(12, 0))
         self.matchonly_vars = {}
         for row, (key, label, default) in enumerate((
@@ -537,15 +564,10 @@ class ScanMediaFoldersApp:
                 row=row, column=1, sticky="ew", padx=(8, 0), pady=2)
         match_settings.columnconfigure(1, weight=1)
         def select_dmts_subtab(_event=None):
-            animal_selected = self.dmts_file_notebook.select() != str(dmts_file_tab)
-            for settings_panel in (pretraining_settings, match_settings):
-                if animal_selected:
-                    settings_panel.pack_forget()
-                else:
-                    settings_panel.pack(fill="x", pady=(12, 0))
-            self.dmts_file_notebook.pack_configure(fill="both" if animal_selected else "x", expand=animal_selected)
-            selected_panel = self.root.nametowidget(self.dmts_file_notebook.select())
-            self.dmts_file_notebook.configure(height=selected_panel.winfo_reqheight())
+            selected = self.dmts_file_notebook.select()
+            for panel in dmts_panels.values():
+                panel.pack_forget()
+            dmts_panels[selected].pack(fill="both", expand=True)
             self._draw_dmts_canvas()
         self.dmts_file_notebook.bind("<<NotebookTabChanged>>", select_dmts_subtab)
         ttk.Label(dmts_plot, text="Plot").pack(anchor="w")
@@ -668,16 +690,23 @@ class ScanMediaFoldersApp:
                     self._canvas_button(x, y, label, action, "#F3FAF1" if enabled else "#EEEEEE",
                                         "#59A14F" if enabled else "#AAAAAA", enabled=enabled, ax=ax)
         elif self.dmts_file_var.get():
+            self._canvas_button(16, 16, "Running..." if self._dmts_file_busy else
+                                "Loaded NWB file" if self._dmts_loaded else "Run NWB file",
+                                "dmts_load", "#EEEEEE" if self._dmts_file_busy else "#F7FBFF" if self._dmts_loaded else "#F3FAF1",
+                                "#AAAAAA" if self._dmts_file_busy else "#4C78A8" if self._dmts_loaded else "#59A14F",
+                                enabled=not self._dmts_file_busy, ax=ax)
             actions = [(16, "Plot Time Window", "dmts_pretraining"),
                        (82, "Plot Trial-Aligned\nLicks", "dmts_matchonly"),
                        (148, "Plot Session\nRawdata", "dmts_summary")]
             if self._dmts_export_ready:
                 actions.append((214, "Export results", "dmts_file_export"))
             for y, label, action in actions:
+                if not self._dmts_loaded:
+                    continue
                 if action not in self._dmts_file_actions and action != "dmts_file_export":
                     continue
                 enabled = not self._dmts_file_busy
-                self._canvas_button(16, y, label, action, "#F3FAF1" if enabled else "#EEEEEE",
+                self._canvas_button(182, y, label, action, "#F3FAF1" if enabled else "#EEEEEE",
                                     "#59A14F" if enabled else "#AAAAAA", enabled=enabled, ax=ax)
         self.dmts_canvas.draw_idle()
 
@@ -741,6 +770,10 @@ class ScanMediaFoldersApp:
                         f"{engagement['unknown_eligible_trials']} unknown. Threshold: {engagement['silent_match_threshold']}.\n")
                     if engagement["warning"]:
                         self._write_dmts_animal_output(engagement["warning"] + "\n")
+                    blanks = payload["blank_response"]
+                    self._write_dmts_animal_output("  Blank responses: " + "; ".join(
+                        f"{side}: {blanks[side]['rate_pct']:.1f}% ({blanks[side]['valid_trials']} valid)"
+                        for side in ("any", "left", "right")) + "\n")
                 elif kind == "error":
                     self.dmts_batch_errors.append(payload)
                     self._write_dmts_animal_output(f"Skipped {payload['file']}: {payload['error']}\n")
@@ -799,12 +832,15 @@ class ScanMediaFoldersApp:
             self._plot_dmts_batch()
         elif event.artist.get_gid() == "dmts_batch_save":
             self._save_dmts_batch()
+        if event.artist.get_gid() == "dmts_load":
+            self._load_dmts_file()
+            return
         actions = {"dmts_pretraining": self._run_dmts_pretraining,
                    "dmts_matchonly": self._run_dmts_matchonly,
                    "dmts_summary": self._open_dmts_summary,
                    "dmts_file_export": self._export_dmts_file_results}
         action = event.artist.get_gid()
-        if action in actions and not self._dmts_file_busy and self.dmts_file_var.get():
+        if action in actions and self._dmts_loaded and not self._dmts_file_busy and self.dmts_file_var.get():
             if action not in self._dmts_file_actions and not (action == "dmts_file_export" and self._dmts_export_ready):
                 return
             self._dmts_file_busy = True
@@ -822,7 +858,7 @@ class ScanMediaFoldersApp:
         self.root.update_idletasks()
         try:
             from dmts_summary import plot_session_summary
-            session = load_session_data_fromFile(Path(filename))
+            session = self._dmts_session
             figure = plot_session_summary(session, title=Path(filename).name)
         except Exception as exc:
             messagebox.showerror("Plot Session Rawdata unavailable", str(exc), parent=self.root)
@@ -884,7 +920,7 @@ class ScanMediaFoldersApp:
         self.root.update_idletasks()
         try:
             from dmts_matchonly import plot_matchonly
-            session = load_session_data_fromFile(Path(filename))
+            session = self._dmts_session
             figure, self.lick_events, self.lick_histogram, self.trial_order = plot_matchonly(
                 session, file_path=filename, **settings)
         except Exception as exc:
@@ -892,6 +928,7 @@ class ScanMediaFoldersApp:
             return
         finally:
             self.root.configure(cursor="")
+        self._write_dmts_file_output(f"Trial-aligned analysis: {len(self.trial_order)} trials, {len(self.lick_events)} aligned lick events")
         self._show_dmts_figure(figure, f"Plot Trial-Aligned Licks - {Path(filename).name}", "1300x850")
         self._dmts_export_ready = True
         self._dmts_export_kind = "aligned"
@@ -916,6 +953,7 @@ class ScanMediaFoldersApp:
         except OSError as exc:
             messagebox.showwarning("Plot ready; export failed", str(exc), parent=self.root)
         else:
+            self._write_dmts_file_output(f"Saved analysis results to: {output_folder}")
             print(f"Saved analysis results to:\n{output_folder}")
 
     def _run_dmts_pretraining(self) -> None:
@@ -932,7 +970,7 @@ class ScanMediaFoldersApp:
         self.root.update_idletasks()
         try:
             from dmts_pretraining import plot_pretraining
-            figure, lick_times = plot_pretraining(filename, **settings)
+            figure, lick_times = plot_pretraining(filename, loaded_signals=self._dmts_loaded_signals, **settings)
         except Exception as exc:
             messagebox.showerror("Pretraining analysis failed", str(exc), parent=self.root)
             return
@@ -943,15 +981,23 @@ class ScanMediaFoldersApp:
         self._dmts_export_ready = True
         self._dmts_export_kind = "pretraining"
         self._draw_dmts_canvas()
+        self._write_dmts_file_output(f"Detected licks: left {len(self.left_lick_times)}, right {len(self.right_lick_times)}")
         print("Left lick times (s):", self.left_lick_times)
         print("Right lick times (s):", self.right_lick_times)
 
         self._show_dmts_figure(figure, f"Plot Time Window - {Path(filename).name}", "1300x650")
 
+    def _write_dmts_file_output(self, text):
+        self.dmts_file_output.configure(state="normal")
+        self.dmts_file_output.insert("end", text + "\n")
+        self.dmts_file_output.see("end")
+        self.dmts_file_output.configure(state="disabled")
+
     def _show_dmts_figure(self, figure, title, geometry) -> None:
         from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
         window = tk.Toplevel(self.root)
         window.title(title)
+        self._write_dmts_file_output(f"Opened: {title}")
         window.geometry(geometry)
         canvas = FigureCanvasTkAgg(figure, master=window)
         toolbar = NavigationToolbar2Tk(canvas, window, pack_toolbar=False)
@@ -1066,6 +1112,9 @@ class ScanMediaFoldersApp:
         if not self.dmts_example_var.get():
             if self.dmts_viewer_window is not None and self.dmts_viewer_window.winfo_exists():
                 self.dmts_viewer_window.event_generate("<<CloseDMTSViewer>>")
+            self._dmts_loaded = False
+            self._dmts_session = None
+            self._dmts_loaded_signals = None
             self.dmts_file_var.set("")
             self._dmts_file_actions.clear()
             self._dmts_export_ready = False
@@ -1080,10 +1129,64 @@ class ScanMediaFoldersApp:
                 self._dmts_file_actions.intersection_update({"dmts_pretraining"})
                 self._draw_dmts_canvas()
 
+    def _load_dmts_file(self):
+        if self._dmts_file_busy or not self.dmts_file_var.get():
+            return
+        filename = self.dmts_file_var.get()
+        actions = set(self._dmts_file_actions)
+        self._write_dmts_file_output(f"Loading NWB: {filename}")
+        self._dmts_loaded = False
+        self._dmts_export_ready = False
+        self.dmts_trial_viewer_button.configure(state="disabled")
+        self._dmts_file_busy = True
+        self._draw_dmts_canvas()
+        messages = queue.Queue()
+        def worker():
+            try:
+                if not actions:
+                    raise ValueError("No supported DMTS signals or trial data found. Select another NWB file.")
+                session = load_session_data_fromFile(Path(filename)) if actions & {"dmts_matchonly", "dmts_summary"} else None
+                signals = None
+                if "dmts_pretraining" in actions:
+                    import h5py
+                    from dmts_pretraining import _read_signal
+                    with h5py.File(filename, "r") as handle:
+                        signals = {name: _read_signal(handle["acquisition"], name)
+                                   for name in ("Reward", "LeftLick", "RightLick")}
+                messages.put((session, signals, None))
+            except Exception as exc:
+                messages.put((None, None, str(exc)))
+        def poll():
+            try:
+                session, signals, error = messages.get_nowait()
+            except queue.Empty:
+                self.root.after(100, poll)
+                return
+            self._dmts_file_busy = False
+            if filename != self.dmts_file_var.get() or actions != self._dmts_file_actions:
+                self._draw_dmts_canvas()
+                return
+            if error:
+                self._write_dmts_file_output(f"Loading failed: {error}")
+                messagebox.showerror("NWB loading failed", error, parent=self.root)
+            else:
+                self._dmts_session = session
+                self._dmts_loaded_signals = signals
+                self._dmts_loaded = True
+                self._write_dmts_file_output(f"Loaded NWB: {filename}")
+                self.dmts_trial_viewer_button.configure(state="normal" if session is not None else "disabled")
+            self._draw_dmts_canvas()
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, poll)
+
     def _select_dmts_file(self, filename):
         if self.dmts_viewer_window is not None and self.dmts_viewer_window.winfo_exists():
             self.dmts_viewer_window.event_generate("<<CloseDMTSViewer>>")
         self.dmts_file_var.set(filename)
+        self._write_dmts_file_output(f"Selected: {filename}")
+        self._dmts_loaded = False
+        self._dmts_session = None
+        self._dmts_loaded_signals = None
         self._dmts_file_actions = set()
         self._dmts_export_ready = False
         self.dmts_trial_viewer_button.configure(state="disabled")
@@ -1098,7 +1201,6 @@ class ScanMediaFoldersApp:
                 trials = handle.get("intervals/trials")
                 if trials is not None and all(name in trials for name in ("sample_sound_ids", "test_sound_ids", "HMCF")):
                     self._dmts_file_actions.add("dmts_summary")
-                    self.dmts_trial_viewer_button.configure(state="normal")
                     if all(f"acquisition/{name}/data" in handle for name in ("LeftLick", "RightLick")):
                         self._dmts_file_actions.add("dmts_matchonly")
         except Exception as exc:
@@ -1115,7 +1217,7 @@ class ScanMediaFoldersApp:
         self.root.configure(cursor="watch")
         self.root.update_idletasks()
         try:
-            session = load_session_data_fromFile(Path(filename))
+            session = self._dmts_session
             ir_events, trial_analysis, _ = analyze_session_responses(session, "Licks")
             count = (len(session["dmts_analysis"]["trials"]) if "dmts_analysis" in session
                      else int((np.asarray(session["trialID"]["full"]) == 99).sum()))
@@ -1254,6 +1356,9 @@ class ScanMediaFoldersApp:
         selected = filedialog.askdirectory(initialdir=initial_dir)
         if selected:
             self.active_input = "folder"
+            if not self.hit_source_var.get():
+                self.hit_source_var.set("IR")
+            self.hit_source_status_var.set("Folder input: choose IR or Licks manually.")
             self._single_input_selected = True
             self.folder_var.set(selected)
             self._sync_current_input_label()
@@ -1270,8 +1375,45 @@ class ScanMediaFoldersApp:
             self.active_input = "file"
             self._single_input_selected = True
             self.file_var.set(selected)
+            self._detect_nwb_hit_source(selected)
             self._sync_current_input_label()
             self._draw_selected_input_box()
+
+    def _manual_hit_source(self):
+        self.hit_source_status_var.set(f"Manual override: {self.hit_source_var.get()} (rerun to apply).")
+
+    @staticmethod
+    def _normalize_trigger_type(value):
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        value = str(value).strip().casefold()
+        return {"ir": "IR", "infrared": "IR", "irfork": "IR", "lick": "Licks", "licks": "Licks"}.get(value)
+
+    def _detect_nwb_hit_source(self, filename):
+        self.hit_source_var.set("")
+        source = None
+        detail = "TriggerType missing"
+        try:
+            import h5py
+            with h5py.File(filename, "r") as handle:
+                group = handle.get("acquisition/Parameters")
+                if group is not None and "key" in group and "value" in group:
+                    for key, value in zip(group["key"][:], group["value"][:]):
+                        key = key.decode("utf-8", errors="replace") if isinstance(key, bytes) else str(key)
+                        if key.strip().casefold().replace("_", "") == "triggertype":
+                            source = self._normalize_trigger_type(value)
+                            raw = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+                            detail = f"TriggerType={raw}"
+                            break
+        except (OSError, ValueError, TypeError) as exc:
+            detail = f"Cannot read metadata: {exc}"
+        if source:
+            self.hit_source_var.set(source)
+            message = f"Detected {source} ({detail}). Manual override available."
+        else:
+            message = f"Hit source unknown ({detail}). Select IR or Licks before running."
+        self.hit_source_status_var.set(message)
+        self._write_output(message + "\n")
 
     @staticmethod
     def _infer_animal_name_from_nwb_filename(nwb_path: Path) -> str | None:
@@ -1604,6 +1746,10 @@ class ScanMediaFoldersApp:
             use_folder = not use_file and is_valid_folder
 
         selected_path = target_file if use_file else target_folder
+
+        if self.hit_source_var.get() not in ("IR", "Licks"):
+            messagebox.showinfo("Hit source unknown", "Select IR or Licks before running the analysis.", parent=self.root)
+            return
 
         self._set_running_state(True)
         self._sync_current_input_label()
@@ -2018,9 +2164,12 @@ class ScanMediaFoldersApp:
         for spine in ax.spines.values():
             spine.set_visible(False)
 
-        self._canvas_button(16, 16, "Running..." if self.is_running else f"Run {input_label}",
-                            "run_session", "#EEEEEE" if self.is_running else "#F3FAF1",
-                            "#AAAAAA" if self.is_running else "#59A14F", enabled=not self.is_running)
+        loaded_nwb = self.active_input == "file" and hasattr(self, "single_session_datadict")
+        run_label = "Loaded NWB file" if loaded_nwb else f"Run {input_label}"
+        self._canvas_button(16, 16, "Running..." if self.is_running else run_label,
+                            "run_session", "#EEEEEE" if self.is_running else "#F7FBFF" if loaded_nwb else "#F3FAF1",
+                            "#AAAAAA" if self.is_running else "#4C78A8" if loaded_nwb else "#59A14F",
+                            enabled=not self.is_running)
         if hasattr(self, "single_session_datadict"):
             self._canvas_button(16, 82, "Session\nvariables", "session_console", "#F3FAF1", "#59A14F")
             self._canvas_button(182, 16, "IR occupancy", "plot_ir_occupancy_by_sound", "#F3FAF1", "#59A14F")

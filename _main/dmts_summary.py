@@ -69,7 +69,7 @@ def plot_performance_by_sound(session, title="DMTS session"):
             elif values is not None:
                 pair_ax.text(col, row, "N/A\nn=0", ha="center", va="center", fontsize=font_size)
     fig.colorbar(image, ax=pair_ax, shrink=.8, label="Correct rejection (%)")
-    fig.suptitle(f"DMTS performance by sound - {title}", fontsize=12)
+    fig.suptitle(f"DMTS Performance by StimID - {title}", fontsize=12)
     fig.text(.5, .02, "Saved pyBEHAVIOR outcomes; blank and unknown outcomes excluded. n = eligible trials.\n"
              "Heatmap: diagonal = match trials; empty grey cells = untested pairs; N/A = no eligible outcomes.",
              ha="center", fontsize=9)

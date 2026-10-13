@@ -526,6 +526,11 @@ class ScanMediaFoldersApp:
         self.dmts_trial_viewer_button = ttk.Button(
             dmts_file_main, text="Trial Viewer", command=self._open_dmts_trial_viewer, state="disabled")
         self.dmts_trial_viewer_button.pack(fill="x", pady=(6, 0))
+        self.dmts_voltage_viewer_button = ttk.Button(
+            dmts_file_main, text="Trial voltages (log)",
+            command=self._open_dmts_voltage_viewer, state="disabled")
+        self.dmts_voltage_viewer_button.pack(fill="x", pady=(6, 0))
+        self.dmts_file_var.trace_add("write", lambda *_args: self._update_dmts_voltage_button())
         ttk.Label(dmts_file_main, textvariable=self.dmts_file_var, wraplength=300).pack(
             anchor="w", pady=(6, 0))
         ttk.Label(dmts_file_main, text="Output").pack(anchor="w", pady=(10, 4))
@@ -701,7 +706,7 @@ class ScanMediaFoldersApp:
             actions = [(16, "Plot Time Window", "dmts_pretraining"),
                        (82, "Plot Trial-Aligned\nLicks", "dmts_matchonly"),
                        (148, "Plot Session\nRawdata", "dmts_summary"),
-                       (214, "Performance\nby sound", "dmts_sound_performance")]
+                       (214, "Performance\nby StimID", "dmts_sound_performance")]
             if self._dmts_export_ready:
                 actions.append((280, "Export results", "dmts_file_export"))
             for y, label, action in actions:
@@ -712,6 +717,15 @@ class ScanMediaFoldersApp:
                 enabled = not self._dmts_file_busy
                 self._canvas_button(182, y, label, action, "#F3FAF1" if enabled else "#EEEEEE",
                                     "#59A14F" if enabled else "#AAAAAA", enabled=enabled, ax=ax)
+            csv_ready = bool(getattr(self, "_dmts_csv_trials", None))
+            csv_available = bool(self._dmts_voltage_logs())
+            self._canvas_button(16, 346, "Loaded CSV file" if csv_ready else "Load CSV file",
+                                "dmts_csv_load", "#F7FBFF" if csv_ready else "#F3FAF1" if csv_available else "#EEEEEE",
+                                "#4C78A8" if csv_ready else "#59A14F" if csv_available else "#AAAAAA",
+                                enabled=csv_available, ax=ax)
+            self._canvas_button(182, 346, "Average voltages\nby StimID", "dmts_csv_average",
+                                "#F3FAF1" if csv_ready else "#EEEEEE",
+                                "#59A14F" if csv_ready else "#AAAAAA", enabled=csv_ready, ax=ax)
         self.dmts_canvas.draw_idle()
 
     def _write_dmts_animal_output(self, text):
@@ -827,6 +841,12 @@ class ScanMediaFoldersApp:
         self._write_dmts_animal_output(f"Saved DMTS batch data: {filename}\n")
 
     def _handle_dmts_canvas_pick(self, event) -> None:
+        if event.artist.get_gid() == "dmts_csv_load":
+            self._load_dmts_csv()
+            return
+        if event.artist.get_gid() == "dmts_csv_average":
+            self._open_dmts_csv_average()
+            return
         if event.artist.get_gid() == "dmts_groups_plot":
             self._plot_dmts_groups()
             return
@@ -863,9 +883,9 @@ class ScanMediaFoldersApp:
             name = Path(self.dmts_file_var.get()).name
             figure = plot_performance_by_sound(self._dmts_session, title=name)
         except Exception as exc:
-            messagebox.showerror("Performance by sound unavailable", str(exc), parent=self.root)
+            messagebox.showerror("Performance by StimID unavailable", str(exc), parent=self.root)
             return
-        self._show_dmts_figure(figure, f"Performance by sound - {name}", "1400x850")
+        self._show_dmts_figure(figure, f"Performance by StimID - {name}", "1400x850")
 
     def _open_dmts_summary(self) -> None:
         filename = self.dmts_file_var.get()
@@ -1222,6 +1242,103 @@ class ScanMediaFoldersApp:
         except Exception as exc:
             messagebox.showerror("Unable to read NWB file", str(exc), parent=self.root)
         self._draw_dmts_canvas()
+
+    def _update_dmts_voltage_button(self):
+        self._dmts_csv_trials = []
+        self._dmts_csv_path = None
+        existing = getattr(self, "dmts_voltage_window", None)
+        if existing is not None and existing.winfo_exists():
+            self.dmts_voltage_viewer.close()
+        logs = self._dmts_voltage_logs()
+        self.dmts_voltage_viewer_button.configure(state="normal" if logs else "disabled")
+
+    def _dmts_csv_loaded(self, path, trials):
+        self._dmts_csv_path = path
+        self._dmts_csv_trials = trials
+        self._write_dmts_file_output(f"Loaded CSV file: {path}")
+        self._draw_dmts_canvas()
+
+    def _open_dmts_csv_average(self):
+        if not getattr(self, "_dmts_csv_trials", None):
+            return
+        from types import SimpleNamespace
+        from dmts_voltage_viewer import DMTSVoltageViewer
+        state = SimpleNamespace(trials=self._dmts_csv_trials, window=self.root,
+                                file_path=tk.StringVar(master=self.root, value=str(self._dmts_csv_path)),
+                                summary_closers=[])
+        DMTSVoltageViewer.open_stim_summary(state)
+
+    def _dmts_voltage_logs(self):
+        filename = self.dmts_file_var.get()
+        if not filename or not Path(filename).is_file():
+            return []
+        try:
+            mouse = self._infer_animal_name_from_nwb_filename(Path(filename))
+            if not mouse:
+                import h5py
+                with h5py.File(filename, "r") as handle:
+                    subject = handle.get("general/subject/subject_id")
+                    if subject is not None:
+                        value = subject[()]
+                        mouse = value.decode("utf-8") if isinstance(value, bytes) else str(value)
+            if not mouse:
+                return []
+            return sorted((path for path in Path(filename).parent.iterdir()
+                           if path.is_file() and path.suffix.lower() == ".csv"
+                           and re.match(re.escape(mouse.strip()) + r"(?=$|[_\- .])", path.stem, re.IGNORECASE)),
+                          key=lambda path: path.name.lower())
+        except OSError:
+            return []
+
+    def _select_dmts_csv_log(self):
+        logs = self._dmts_voltage_logs()
+        self.dmts_voltage_viewer_button.configure(state="normal" if logs else "disabled")
+        if not logs:
+            return None
+        if len(logs) > 1:
+            # Prefer the log sharing the NWB session's date/time tokens.
+            tokens = set(re.findall(r"(?<!\d)\d{6,8}(?!\d)", Path(self.dmts_file_var.get()).stem))
+            scores = [len(tokens & set(re.findall(r"(?<!\d)\d{6,8}(?!\d)", path.stem))) for path in logs]
+            best = max(scores)
+            candidates = [path for path, score in zip(logs, scores) if score == best]
+            if best > 0 and len(candidates) == 1:
+                return candidates[0]
+            self._write_dmts_file_output("Multiple mouse-prefixed CSV logs found; cannot identify a unique session log: "
+                                         + ", ".join(path.name for path in logs))
+            messagebox.showerror("Multiple CSV logs",
+                                 "More than one log matches this mouse. Keep the corresponding session log in the NWB folder.",
+                                 parent=self.root)
+            return None
+        return logs[0]
+
+    def _load_dmts_csv(self):
+        selected = self._select_dmts_csv_log()
+        if selected is None:
+            return
+        from dmts_voltage_viewer import parse_dmts_log_file
+        try:
+            trials = parse_dmts_log_file(selected)
+            if not trials:
+                raise ValueError("No DMTS trial presentations were found.")
+        except Exception as exc:
+            messagebox.showerror("Could not load CSV log", str(exc), parent=self.root)
+            return
+        self._dmts_csv_loaded(selected, trials)
+
+    def _open_dmts_voltage_viewer(self) -> None:
+        existing = getattr(self, "dmts_voltage_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        selected = getattr(self, "_dmts_csv_path", None) or self._select_dmts_csv_log()
+        if selected is None:
+            return
+        from dmts_voltage_viewer import DMTSVoltageViewer
+        window = tk.Toplevel(self.root)
+        window.geometry("1400x800")
+        self.dmts_voltage_window = window
+        self.dmts_voltage_viewer = DMTSVoltageViewer(window, default_file=selected,
+                                                    on_loaded=self._dmts_csv_loaded)
 
     def _open_dmts_trial_viewer(self) -> None:
         if self.dmts_viewer_window is not None and self.dmts_viewer_window.winfo_exists():

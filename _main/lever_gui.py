@@ -1,5 +1,6 @@
 """Independent Lever NWB loading and trial inspection for GUI v10."""
 from pathlib import Path
+import csv
 import queue
 import threading
 import tkinter as tk
@@ -71,6 +72,13 @@ def load_lever_file(filename):
         if stops.shape != starts.shape or not np.isfinite(stops).all() or np.any(stops <= starts):
             raise ValueError("Invalid trial stop times")
         labels = np.full(len(starts), "", dtype=object)
+        events = {key: np.full(len(starts), np.nan) for key in
+                  ('trigger_time_s', 'crossing_duration_s', 'trial_end_s')}
+        for key in events:
+            if trials is not None and key in trials:
+                column = np.asarray(trials[key], dtype=float)
+                if column.shape == starts.shape:
+                    events[key] = column
         if trials is not None and "trial_type" in trials:
             labels = np.asarray([v.decode() if isinstance(v, bytes) else str(v)
                                  for v in trials["trial_type"][:]])
@@ -90,8 +98,84 @@ def load_lever_file(filename):
                     inferred.append(None)
             if all(inferred) and inferred[0] != inferred[1]:
                 label_defaults = tuple(inferred)
+    if isinstance(filename, (str, Path)) and any(np.isnan(v).any() for v in events.values()):
+        log_path = Path(filename).parent / 'TrialLog.csv'
+        if log_path.is_file():
+            with log_path.open(encoding='utf-8-sig', newline='') as stream:
+                rows = list(csv.DictReader(stream))
+            def number(row, key):
+                try:
+                    return float(row.get(key, ''))
+                except (TypeError, ValueError):
+                    return np.nan
+            triggers = np.array([number(row, 'trigger_time_s') for row in rows])
+            matched = 0
+            used = set()
+            for index, anchor in enumerate(starts):
+                reference = events['trigger_time_s'][index]
+                if not np.isfinite(reference):
+                    reference = anchor
+                candidates = np.flatnonzero(np.isfinite(triggers) & (np.abs(triggers-reference) <= .101))
+                if len(candidates) != 1 or int(candidates[0]) in used:
+                    continue
+                row_index = int(candidates[0])
+                used.add(row_index)
+                matched += 1
+                for key, column in events.items():
+                    if not np.isfinite(column[index]):
+                        column[index] = number(rows[row_index], key)
+            timing_note += f' TrialLog.csv timing matched for {matched}/{len(starts)} trials.'
+        else:
+            timing_note += ' TrialLog.csv not found; missing event markers omitted.'
     return dict(signals=signals, starts=starts, stops=stops, labels=labels,
-                parameters=parameters, label_defaults=label_defaults, timing_note=timing_note)
+                parameters=parameters, label_defaults=label_defaults, timing_note=timing_note, events=events)
+
+
+def plot_crossing_distribution(data, go_label='Go', test_label='Test', plot_layout=None):
+    labels = np.asarray([str(v).strip().casefold() for v in data['labels']])
+    selected = [go_label.strip().casefold(), test_label.strip().casefold()]
+    if not all(selected) or selected[0] == selected[1]:
+        raise ValueError('Enter two different recorded trial labels for GO and Test.')
+    durations = np.asarray(data.get('events', {}).get('crossing_duration_s',
+                           np.full(len(labels), np.nan)), dtype=float)
+    valid = np.isfinite(durations) & (durations >= 0)
+    pooled = durations[valid & np.isin(labels, selected)]
+    if not len(pooled):
+        raise ValueError('No valid crossing durations for the selected GO/Test trials. Reload the NWB file to read TrialLog.csv.')
+    bins = np.histogram_bin_edges(pooled, bins='auto')
+    if len(bins) > 101:
+        bins = np.linspace(bins[0], bins[-1], 101)
+    layout = plot_layout or {}
+    dpi = float(layout.get('dpi', 100))
+    figure = Figure(figsize=(float(layout.get('subplot_width_px', 500))/dpi,
+                             2*float(layout.get('subplot_height_px', 400))/dpi),
+                    dpi=dpi, constrained_layout=True)
+    axes = figure.subplots(2, 1, sharex=True, sharey=True)
+    for ax, label, title in zip(axes, selected, ('GO', 'Test')):
+        mask = labels == label
+        values = durations[valid & mask]
+        weights = np.full(len(values), 100.0 / len(values)) if len(values) else np.array([])
+        ax.hist(values, bins=bins, weights=weights, color='steelblue', edgecolor='white')
+        ax.set(title=f'{title}: {len(values)} trials; {np.sum(mask & ~valid)} excluded',
+               xlabel='Crossing end from trigger (s)', ylabel='Trials in condition (%)')
+        ax.tick_params(axis='y', labelleft=True)
+        if len(values):
+            trial_count = len(values)
+            count_axis = ax.secondary_yaxis(
+                'right', functions=(lambda percent, n=trial_count: percent*n/100,
+                                    lambda count, n=trial_count: count*100/n))
+            count_axis.set_ylabel('Number of trials')
+            from matplotlib.ticker import MaxNLocator
+            count_axis.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.grid(axis='y', alpha=.2)
+        if len(values):
+            ax.axvline(np.median(values), color='black', ls='--',
+                       label=f'Median: {np.median(values):.2f} s')
+            ax.legend(fontsize=8)
+        else:
+            ax.text(.5, .5, 'No valid crossing durations', ha='center', transform=ax.transAxes)
+    figure.suptitle('Crossing-end distribution')
+    return figure
 
 
 def lever_mean_sem(matrix):
@@ -236,19 +320,25 @@ class LeverPanel:
             self.load()
         elif action == 'lever_plot':
             self.open_plot()
+        elif action == 'lever_crossing':
+            self.open_plot(distribution=True)
 
-    def open_plot(self):
+    def open_plot(self, distribution=False):
         if self.data is None:
             return
         try:
-            figure = plot_lever_trials(self.data, self.channel.get(), self.go_label.get(),
+            if distribution:
+                figure = plot_crossing_distribution(self.data, self.go_label.get(), self.test_label.get(),
+                                                    self.app.preferences.get('plot_layout', {}))
+            else:
+                figure = plot_lever_trials(self.data, self.channel.get(), self.go_label.get(),
                                       self.test_label.get(), self.app.preferences.get('plot_layout', {}),
                                       window_s=float(self.window_s.get()))
         except Exception as exc:
             messagebox.showerror('Lever plot', str(exc), parent=self.root)
             return
         window = tk.Toplevel(self.root)
-        window.title(f'Lever across trials - {Path(self.filename.get()).name}')
+        window.title(f'{"Crossing-end distribution" if distribution else "Lever across trials"} - {Path(self.filename.get()).name}')
         canvas = FigureCanvasTkAgg(figure, window)
         toolbar = NavigationToolbar2Tk(canvas, window, pack_toolbar=False)
         toolbar.pack(side='bottom', fill='x')
@@ -285,6 +375,9 @@ class LeverPanel:
                 "#AAAAAA" if self.busy else "#4C78A8" if loaded else "#59A14F", enabled=not self.busy, ax=self.ax)
             if loaded and len(self.data['starts']) and self.channel.get():
                 self.app._canvas_button(182, 16, 'Plot Lever Across Trials', 'lever_plot',
+                                        '#F3FAF1', '#59A14F', ax=self.ax)
+            if loaded and np.any(np.isfinite(self.data.get('events', {}).get('crossing_duration_s', []))):
+                self.app._canvas_button(182, 82, 'Plot Crossing Distribution', 'lever_crossing',
                                         '#F3FAF1', '#59A14F', ax=self.ax)
         self.canvas.draw_idle()
 
@@ -348,13 +441,34 @@ class LeverPanel:
         window.geometry("1000x800")
         controls = ttk.Frame(window, padding=8)
         controls.pack(fill="x")
+        parameters = data.get('parameters', {})
+        try:
+            mode_flags = (int(parameters['LeverReqRelBonus']), int(parameters['LeverReqRelWindow']))
+        except (KeyError, TypeError, ValueError):
+            mode_flags = None
+        mode = {(0, 0): 'Simple hold', (1, 0): 'Release + bonus',
+                (0, 1): 'Release within window'}.get(mode_flags, 'Unknown')
+        release_target = None
+        if mode_flags in ((1, 0), (0, 1)):
+            try:
+                hold = float(parameters.get('LeverHoldTime_s', parameters.get('lever_hold_time_s', '')))
+                half_width = float(parameters.get('LeverReleaseWindow_s', parameters.get('lever_release_window_s', '')))
+                if np.isfinite(hold) and np.isfinite(half_width) and hold > 0 and half_width >= 0:
+                    release_target = (hold-half_width, hold+half_width)
+            except (TypeError, ValueError):
+                pass
+        ttk.Label(window, text=f'Lever mode: {mode}', padding=(8, 0, 8, 4)).pack(anchor='w')
         index = tk.StringVar(value="0")
         status = tk.StringVar()
         ttk.Label(controls, text="Trial index:").pack(side="left")
         entry = ttk.Entry(controls, textvariable=index, width=8)
         entry.pack(side="left")
         figure = Figure(figsize=(10, 7))
-        names = [name for name in data['signals'] if name != 'TrialType'] or list(data['signals'])
+        names = [name for name in data['signals']
+                 if name != 'TrialType'
+                 and not (name.casefold() == 'irfork'
+                          and any(key.casefold() == 'behaviorsignal' for key in data['signals']))]
+        names = names or list(data['signals'])
         axes = figure.subplots(len(names), 1, sharex=True, squeeze=False)[:, 0]
         canvas = FigureCanvasTkAgg(figure, window)
         toolbar = NavigationToolbar2Tk(canvas, window, pack_toolbar=False)
@@ -368,16 +482,57 @@ class LeverPanel:
             value = min(max(value+delta, 0), len(data['starts'])-1)
             index.set(str(value))
             start, stop = data['starts'][value], data['stops'][value]
+            events = data.get('events', {})
+            def event_time(key):
+                return events[key][value] if key in events else np.nan
+            trigger = event_time('trigger_time_s')
+            crossing_duration = event_time('crossing_duration_s')
+            trial_end = event_time('trial_end_s')
+            # Exact trigger timestamps replace rounded compatibility anchors in this viewer.
+            if np.isfinite(trigger):
+                start = trigger
+            if np.isfinite(trial_end) and trial_end > start:
+                stop = trial_end
+            points = [(trigger, 'Trigger', 'green'),
+                      (trigger+crossing_duration if crossing_duration >= 0 else np.nan,
+                       'Crossing end', 'purple'), (trial_end, 'Trial end', 'black')]
             for ax, name in zip(axes, names):
                 times, values, unit = data['signals'][name]
                 mask = (times >= start-.5) & (times <= stop+.5)
                 ax.clear()
                 ax.step(times[mask]-start, values[mask], where="post", lw=.8)
+                if name.casefold() in ('behaviorsignal', 'irfork', 'lever'):
+                    for key in ('Threshold', 'threshold_v'):
+                        try:
+                            threshold = float(data.get('parameters', {}).get(key, ''))
+                        except (TypeError, ValueError):
+                            continue
+                        if np.isfinite(threshold):
+                            ax.axhline(threshold, color='red', linestyle='--', linewidth=1.5,
+                                       label=f'Trial-start threshold: {threshold:g} V')
+                            break
                 ax.axvspan(0, stop-start, color="steelblue", alpha=.1)
+                if release_target is not None:
+                    lower, upper = release_target
+                    ax.axvspan(lower, upper, color='orange', alpha=.25,
+                               label=f'Release target: {lower:g}–{upper:g} s')
+                for timestamp, label, color in points:
+                    if np.isfinite(timestamp):
+                        ax.axvline(timestamp-start, color=color, linestyle=':', linewidth=1.4,
+                                   label=f'{label}: {timestamp-start:g} s')
+                if ax.get_legend_handles_labels()[0]:
+                    ax.legend(loc='upper center', fontsize=8)
                 ax.set_ylabel(f"{name}\n{unit}", fontsize=8)
                 ax.grid(alpha=.2)
             axes[-1].set(xlabel="Time from trial start (s)", xlim=(-.5, stop-start+.5))
-            status.set(f"Showing {value} / {len(data['starts'])-1}")
+            recorded_type = str(data['labels'][value]).strip()
+            trial_type = recorded_type or 'Unknown'
+            if recorded_type.casefold() == self.go_label.get().strip().casefold() and recorded_type:
+                trial_type = f'GO ({recorded_type})'
+            elif recorded_type.casefold() == self.test_label.get().strip().casefold() and recorded_type:
+                trial_type = f'Test ({recorded_type})'
+            status.set(f"Showing {value} / {len(data['starts'])-1} | Trial type: {trial_type}")
+            figure.suptitle(f'Trial {value + 1} — {trial_type}')
             figure.tight_layout()
             toolbar.update()
             canvas.draw()

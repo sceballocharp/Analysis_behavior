@@ -692,6 +692,7 @@ class ScanMediaFoldersApp:
                     (16, 16, "Running..." if self._dmts_batch_running else "Batch performance", "dmts_batch", not self._dmts_batch_running),
                     (182, 16, "Plot results", "dmts_batch_plot", ready),
                     (16, 82, "Save data", "dmts_batch_save", ready),
+                    (182, 82, "Hit by StimID\nacross sessions", "dmts_batch_stim_hit", ready),
                 ):
                     if action != "dmts_batch" and not ready:
                         continue
@@ -856,6 +857,9 @@ class ScanMediaFoldersApp:
             self._plot_dmts_batch()
         elif event.artist.get_gid() == "dmts_batch_save":
             self._save_dmts_batch()
+        elif event.artist.get_gid() == "dmts_batch_stim_hit":
+            self._plot_dmts_batch_stim_hit()
+            return
         if event.artist.get_gid() == "dmts_load":
             self._load_dmts_file()
             return
@@ -876,6 +880,17 @@ class ScanMediaFoldersApp:
             finally:
                 self._dmts_file_busy = False
                 self._draw_dmts_canvas()
+
+    def _plot_dmts_batch_stim_hit(self):
+        if self._dmts_batch_running or not self.dmts_batch_results:
+            return
+        try:
+            from dmts_batch import plot_hit_by_stim_sessions
+            figure = plot_hit_by_stim_sessions(self.dmts_batch_results)
+        except ValueError as exc:
+            messagebox.showerror("Hit by StimID unavailable", str(exc), parent=self.root)
+            return
+        self._show_dmts_figure(figure, "DMTS Hit by StimID across sessions", "1200x750")
 
     def _open_dmts_sound_performance(self) -> None:
         try:

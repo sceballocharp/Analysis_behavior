@@ -106,6 +106,55 @@ def summarize_session(session, path, silent_match_threshold=5):
                 blank_response=blank_summary(trials))
 
 
+def session_hit_rates_by_stim(results):
+    """Match hit rates per session; session means must not pool trial counts."""
+    grouped = {}
+    for session in sorted(results, key=session_sort_key):
+        values = {}
+        for trial in session["trials"]:
+            if trial["kind"] != "match":
+                continue
+            outcome = trial["outcome"]
+            if outcome not in ("Hit", "Miss", "FalseAlarm", "Correct"):
+                continue
+            values.setdefault(int(trial["sample_id"]), []).append(outcome == "Hit")
+        for stim, hits in values.items():
+            grouped.setdefault(stim, []).append(dict(file=session["file"], n_trials=len(hits),
+                                                     hit_pct=100 * np.mean(hits)))
+    return grouped
+
+
+def plot_hit_by_stim_sessions(results):
+    grouped = session_hit_rates_by_stim(results)
+    if not grouped:
+        raise ValueError("No eligible match trials found. Run batch performance first.")
+    stimuli = sorted(grouped)
+    fig = Figure(figsize=(max(10, len(stimuli) * .7), 6))
+    ax = fig.subplots()
+    rng = np.random.default_rng(0)
+    means = []
+    for index, stim in enumerate(stimuli):
+        rates = np.array([session["hit_pct"] for session in grouped[stim]])
+        means.append(rates.mean())
+        ax.scatter(index + rng.uniform(-.17, .17, len(rates)), rates, s=42,
+                   facecolors="none", edgecolors="#2F6F9F", alpha=.65,
+                   label="Individual session" if index == 0 else None)
+        ax.annotate(f"n={len(rates)} sessions", (index, 100), xytext=(0, 12),
+                    textcoords="offset points", ha="center", fontsize=9)
+    ax.plot(range(len(stimuli)), means, "o-", color="black", markersize=7,
+            linewidth=1.5, label="Mean across sessions")
+    ax.set_xticks(range(len(stimuli)), stimuli)
+    ax.set(xlabel="StimID (sample = test)", ylabel="Match hit rate (%)", ylim=(-2, 112),
+           title="DMTS hit rate by StimID across sessions")
+    ax.grid(axis="y", alpha=.25)
+    ax.legend(loc="best")
+    fig.text(.5, .02, "Saved outcomes; match trials only. Each circle is one session. Mean gives sessions equal weight.\n"
+             "Unknown outcomes excluded; sessions without eligible trials for a stimulus contribute no point.",
+             ha="center", fontsize=9)
+    fig.tight_layout(rect=(0, .09, 1, 1))
+    return fig
+
+
 def plot_batch(results, show_engaged_only=False):
     if not results:
         raise ValueError("Run batch performance first.")

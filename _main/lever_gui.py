@@ -72,6 +72,11 @@ def load_lever_file(filename):
         if stops.shape != starts.shape or not np.isfinite(stops).all() or np.any(stops <= starts):
             raise ValueError("Invalid trial stop times")
         labels = np.full(len(starts), "", dtype=object)
+        nwb_trial_end = np.full(len(starts), np.nan)
+        if trials is not None and 'trial_end_s' in trials:
+            column = np.asarray(trials['trial_end_s'], dtype=float)
+            if column.shape == starts.shape:
+                nwb_trial_end = column.copy()
         events = {key: np.full(len(starts), np.nan) for key in
                   ('trigger_time_s', 'crossing_duration_s', 'trial_end_s')}
         for key in events:
@@ -128,7 +133,8 @@ def load_lever_file(filename):
         else:
             timing_note += ' TrialLog.csv not found; missing event markers omitted.'
     return dict(signals=signals, starts=starts, stops=stops, labels=labels,
-                parameters=parameters, label_defaults=label_defaults, timing_note=timing_note, events=events)
+                parameters=parameters, label_defaults=label_defaults, timing_note=timing_note, events=events,
+                nwb_trial_end=nwb_trial_end)
 
 
 def plot_crossing_distribution(data, go_label='Go', test_label='Test', plot_layout=None):
@@ -201,7 +207,11 @@ def plot_lever_trials(data, channel, go_label="Go", test_label="Test", plot_layo
         available = ', '.join(sorted(set(labels))) or '(missing trial_type)'
         raise ValueError(f"No matching GO or Test trials. Recorded labels: {available}")
     times, values, unit = data['signals'][channel]
-    duration = float(np.max(data['stops'] - data['starts']))
+    trial_limits = np.asarray(data['stops'], dtype=float).copy()
+    nwb_ends = np.asarray(data.get('nwb_trial_end', np.full(len(trial_limits), np.nan)))
+    valid_ends = np.isfinite(nwb_ends) & (nwb_ends >= data['starts'])
+    trial_limits[valid_ends] = nwb_ends[valid_ends] + .5
+    duration = float(np.max(trial_limits - data['starts']))
     if window_s is not None:
         duration = float(window_s)
         if not np.isfinite(duration) or duration <= 0:
@@ -244,7 +254,7 @@ def plot_lever_trials(data, channel, go_label="Go", test_label="Test", plot_layo
             target = data['starts'][trial] + relative
             positions = np.searchsorted(times, target, side='right') - 1
             valid = ((positions >= 0) & (target <= times[-1]) &
-                     (target < data['stops'][trial]))
+                     (target <= trial_limits[trial]))
             matrix[row, valid] = values[positions[valid]]
         mean, sem = lever_mean_sem(matrix)
         avg_ax.fill_between(relative, mean-sem, mean+sem, color='black', alpha=.2,

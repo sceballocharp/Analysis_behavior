@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 from dmts_batch import session_sort_key
+from dmts_blanks import blank_rolling
 
 
 def export_curves(payload, engaged_only=False):
@@ -35,6 +36,15 @@ def export_curves(payload, engaged_only=False):
             rolling = pd.Series(values, index=indices).rolling(25, min_periods=1).mean() * 100
             curve = rolling.reindex(range(len(trials))).ffill().to_numpy()
         curves[kind] = curve
+    for side in ("any", "left", "right"):
+        pieces = []
+        for session in sessions:
+            positions, rates = blank_rolling(session["trials"], side)
+            curve = np.full(len(session["trials"]), np.nan)
+            if len(positions):
+                curve = pd.Series(rates, index=positions-1).reindex(range(len(curve))).ffill().to_numpy()
+            pieces.append(curve)
+        curves["blank_"+side] = np.concatenate(pieces)
     return curves
 
 
@@ -59,13 +69,18 @@ def plot_groups(exports, assignments, engaged_only=False, plot_layout=None):
         except (TypeError, ValueError):
             return default
     dpi = positive("dpi", 100)
-    fig = Figure(figsize=(positive("subplot_width_px", 500)/dpi,
+    has_blanks = any(np.isfinite(curves["blank_any"]).any() or np.isfinite(curves["blank_left"]).any()
+                     or np.isfinite(curves["blank_right"]).any() for curves in prepared.values())
+    columns = 2 if has_blanks else 1
+    fig = Figure(figsize=(columns*positive("subplot_width_px", 500)/dpi,
                           3*positive("subplot_height_px", 300)/dpi), dpi=dpi)
-    axes = fig.subplots(3, 1, sharex=True)
+    grid = fig.subplots(3, columns, sharex=True, squeeze=False)
+    axes = list(grid[:, 0]) + (list(grid[:, 1]) if has_blanks else [])
     groups = sorted({assignments.get(key, "All files") for key in exports})
     colors = ["#2878B5", "#339966", "#AA66BB", "#D55E00", "#CC4444"]
     averages = {}
-    for ax, metric in zip(axes, ("overall", "match", "nonmatch")):
+    metrics = ["overall", "match", "nonmatch"] + (["blank_any", "blank_left", "blank_right"] if has_blanks else [])
+    for ax, metric in zip(axes, metrics):
         for g, group in enumerate(groups):
             keys = [key for key in exports if assignments.get(key, "All files") == group]
             curves = [prepared[key][metric] for key in keys]
@@ -76,12 +91,15 @@ def plot_groups(exports, assignments, engaged_only=False, plot_layout=None):
             if np.isfinite(mean).any():
                 ax.plot(np.arange(1, len(mean)+1), mean, color=colors[g % len(colors)], lw=2.3,
                         label=f"{group} mean ({len(keys)} files)")
-        ax.set(title=metric.capitalize(), ylabel="Performance (%)", ylim=(-2, 102))
+        ax.set(title=metric.replace("blank_any", "Blank either side").replace("_", " ").capitalize(),
+               ylabel="Blank response (%)" if metric.startswith("blank_") else "Performance (%)", ylim=(-2, 102))
         ax.grid(alpha=.2)
         if ax.get_legend_handles_labels()[0]:
             ax.legend(fontsize=8)
-    axes[-1].set_xlabel("Cumulative session trial number")
+    for ax in grid[-1]:
+        ax.set_xlabel("Cumulative session trial number")
     fig.suptitle("DMTS groups — " + ("engaged-only" if engaged_only else "all eligible trials") +
-                 "\nThin: individual PKLs; bold: equal-file mean; rolling 25 eligible trials", fontsize=9)
+                 "\nThin: individual PKLs; bold: equal-file mean; rolling 25 eligible trials"
+                 + ("\nBlanks: 25 valid blanks/session; independent of engagement filter" if has_blanks else ""), fontsize=9)
     fig.tight_layout(rect=(0, 0, 1, .94))
     return fig, averages

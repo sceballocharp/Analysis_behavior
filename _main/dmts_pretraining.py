@@ -40,7 +40,7 @@ def _read_signal(acquisition, name):
     return raw, time, rate
 
 
-def plot_pretraining(file_path, t_start=295, t_end=300, threshold_v=1.0, smooth_ms=0):
+def plot_pretraining(file_path, t_start=295, t_end=300, threshold_v=1.0, smooth_ms=0, loaded_signals=None):
     """Return a figure and lick onset arrays, without showing a window."""
     if not np.all(np.isfinite([t_start, t_end, threshold_v, smooth_ms])):
         raise ValueError("Time bounds, threshold, and smoothing must be finite numbers.")
@@ -50,10 +50,12 @@ def plot_pretraining(file_path, t_start=295, t_end=300, threshold_v=1.0, smooth_
         raise ValueError("smooth_ms must be >= 0.")
 
     # Read reward using its own timing metadata, independently of the lick channels.
-    with h5py.File(file_path, "r") as handle:
-        acquisition = handle["acquisition"]
-        reward, reward_time, _ = _read_signal(acquisition, "Reward")
-        signals = {name: _read_signal(acquisition, name) for name in ("LeftLick", "RightLick")}
+    if loaded_signals is None:
+        with h5py.File(file_path, "r") as handle:
+            loaded_signals = {name: _read_signal(handle["acquisition"], name)
+                              for name in ("Reward", "LeftLick", "RightLick")}
+    reward, reward_time, _ = loaded_signals["Reward"]
+    signals = {name: loaded_signals[name] for name in ("LeftLick", "RightLick")}
 
     prepared = {}
     lick_times = {}

@@ -4,6 +4,7 @@ import pandas as pd
 from matplotlib.figure import Figure
 from dmts_analysis import parameters, analyze_dmts
 from datetime import datetime, timezone
+from dmts_blanks import add_blank_responses, blank_summary, blank_rolling
 
 
 def session_sort_key(result):
@@ -76,6 +77,7 @@ def summarize_session(session, path, silent_match_threshold=5):
         if len(analysis["trials"]) != len(trials):
             raise ValueError("Lick trial count does not match saved results")
         for trial, detected in zip(trials, analysis["trials"]):
+            add_blank_responses(trial, detected)
             # Only complete response windows can establish that there were zero licks.
             complete = detected["outcome"] is not None
             for side in ("Left", "Right"):
@@ -87,6 +89,7 @@ def summarize_session(session, path, silent_match_threshold=5):
         thresholds = {}
         for trial in trials:
             trial.update(left_lick_count=None, right_lick_count=None)
+            add_blank_responses(trial, None)
     engagement = mark_engagement(trials, silent_match_threshold)
     if warning:
         for trial in trials:
@@ -99,15 +102,90 @@ def summarize_session(session, path, silent_match_threshold=5):
         selected = [t for t in trials if t["correct"] is not None and (kind is None or t["kind"] == kind)]
         return 100 * np.mean([t["correct"] for t in selected]) if selected else float("nan")
     return dict(file=str(path), session_start_time=session.get("session_start_time"),
-                trials=trials, total=rate(), match=rate("match"), nonmatch=rate("nonmatch"), engagement=engagement)
+                trials=trials, total=rate(), match=rate("match"), nonmatch=rate("nonmatch"), engagement=engagement,
+                blank_response=blank_summary(trials))
+
+
+def session_hit_rates_by_stim(results):
+    """Match hit rates per session; session means must not pool trial counts."""
+    grouped = {}
+    for session in sorted(results, key=session_sort_key):
+        values = {}
+        for trial in session["trials"]:
+            if trial["kind"] != "match":
+                continue
+            outcome = trial["outcome"]
+            if outcome not in ("Hit", "Miss", "FalseAlarm", "Correct"):
+                continue
+            values.setdefault(int(trial["sample_id"]), []).append(outcome == "Hit")
+        for stim, hits in values.items():
+            grouped.setdefault(stim, []).append(dict(file=session["file"], n_trials=len(hits),
+                                                     hit_pct=100 * np.mean(hits)))
+    return grouped
+
+
+def plot_hit_by_stim_sessions(results):
+    grouped = session_hit_rates_by_stim(results)
+    if not grouped:
+        raise ValueError("No eligible match trials found. Run batch performance first.")
+    stimuli = sorted(grouped)
+    fig = Figure(figsize=(max(10, len(stimuli) * .7), 6))
+    ax = fig.subplots()
+    rng = np.random.default_rng(0)
+    means = []
+    for index, stim in enumerate(stimuli):
+        rates = np.array([session["hit_pct"] for session in grouped[stim]])
+        means.append(rates.mean())
+        ax.scatter(index + rng.uniform(-.17, .17, len(rates)), rates, s=42,
+                   facecolors="none", edgecolors="#2F6F9F", alpha=.65,
+                   label="Individual session" if index == 0 else None)
+        ax.annotate(f"n={len(rates)} sessions", (index, 100), xytext=(0, 12),
+                    textcoords="offset points", ha="center", fontsize=9)
+    ax.plot(range(len(stimuli)), means, "o-", color="black", markersize=7,
+            linewidth=1.5, label="Mean across sessions")
+    ax.set_xticks(range(len(stimuli)), stimuli)
+    ax.set(xlabel="StimID (sample = test)", ylabel="Match hit rate (%)", ylim=(-2, 112),
+           title="DMTS hit rate by StimID across sessions")
+    ax.grid(axis="y", alpha=.25)
+    ax.legend(loc="best")
+    fig.text(.5, .02, "Saved outcomes; match trials only. Each circle is one session. Mean gives sessions equal weight.\n"
+             "Unknown outcomes excluded; sessions without eligible trials for a stimulus contribute no point.",
+             ha="center", fontsize=9)
+    fig.tight_layout(rect=(0, .09, 1, 1))
+    return fig
 
 
 def plot_batch(results, show_engaged_only=False):
     if not results:
         raise ValueError("Run batch performance first.")
     results = sorted(results, key=session_sort_key)
-    fig = Figure(figsize=(13, 8))
-    top, bottom = fig.subplots(2, 1)
+    has_blanks = any(t["kind"] == "blank" for r in results for t in r["trials"])
+    fig = Figure(figsize=(13, 11 if has_blanks else 8))
+    axes = fig.subplots(3 if has_blanks else 2, 1)
+    top, bottom = axes[:2]
+    if has_blanks:
+        blank_ax = axes[2]
+        blank_ax.sharex(bottom)
+        offset = 0
+        labeled = set()
+        for result in results:
+            if offset:
+                blank_ax.axvline(offset+.5, color=".7", lw=.7)
+            for side, label, color in (("any", "Either side", "#222222"), ("left", "Left", "#2878B5"),
+                                        ("right", "Right", "#D55E00")):
+                positions, rates = blank_rolling(result["trials"], side)
+                if len(positions):
+                    blank_ax.plot(offset+positions, rates, color=color, marker=".", markersize=3,
+                                  label=label if side not in labeled else "_nolegend_")
+                    labeled.add(side)
+            offset += len(result["trials"])
+        blank_ax.set(title="Blank response rate — last 25 valid blank trials (reset each session)",
+                     xlabel="Cumulative session trial number", ylabel="Blank trials with licks (%)", ylim=(-2, 102))
+        blank_ax.grid(alpha=.2)
+        if labeled:
+            blank_ax.legend()
+        else:
+            blank_ax.text(.5, .5, "Blank lick data unavailable — rerun batch analysis", transform=blank_ax.transAxes, ha="center")
     x = np.arange(1, len(results) + 1)
     for key, label, color in (("total", "Overall", "#222222"), ("match", "Match", "#339966"),
                               ("nonmatch", "Non-match", "#2878B5")):

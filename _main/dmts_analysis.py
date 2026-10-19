@@ -100,7 +100,8 @@ def analyze_dmts(session):
             selected = (times >= rw_start) & (times < rw_end)
             return (len(times) > 1 and times[0] <= rw_start and times[-1] + step >= rw_end - 1e-9
                     and selected.any() and np.all(np.isfinite(np.asarray(signals[side + 'Lick']['data'])[selected])))
-        complete = not missing and all(covers_window(side) for side in ('Left', 'Right'))
+        coverage = {side: side in clocks and covers_window(side) for side in ('Left', 'Right')}
+        complete = all(coverage.values())
         outcome, choice = score_trial(counts.get('Left', []), counts.get('Right', []), minimum, kind) if complete else (None, '')
         saved = str(row.get('SavedOutcome', ''))
         if kind == 'blank':
@@ -108,7 +109,7 @@ def analyze_dmts(session):
         trials.append(dict(index=index, sample_id=sample, test_id=test, kind=kind,
                            start=start, test_start=test_start, response_start=rw_start,
                            response_end=rw_end, timing=timing, events=counts,
-                           outcome=outcome, saved_outcome=saved, choice=choice))
+                           outcome=outcome, saved_outcome=saved, choice=choice, response_coverage=coverage))
     # Missing channels/partial recordings retain recorded outcomes, explicitly labelled.
     effective = [t['outcome'] if t['outcome'] is not None else t['saved_outcome'] for t in trials]
     for name, values in {

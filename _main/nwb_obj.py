@@ -230,6 +230,30 @@ class session_data_nwb():
                                    ('test_sound_ids', 'TestSoundId')]:
                 if source in trials_group:
                     data[target] = np.asarray(trials_group[source])
+            params = {
+                k.decode('utf-8') if isinstance(k, bytes) else str(k):
+                v.decode('utf-8') if isinstance(v, bytes) else str(v)
+                for k, v in zip(h5f['acquisition/Parameters/key'][:],
+                                h5f['acquisition/Parameters/value'][:])
+            }
+            if params.get('DMTSStimulusSource', '').strip().upper() == 'LED':
+                required = ('sample_light_id', 'test_light_id')
+                if any(name not in trials_group for name in required):
+                    raise ValueError('LED DMTS requires sample_light_id and test_light_id.')
+                data['SampleLightId'] = np.asarray(trials_group['sample_light_id'])
+                data['TestLightId'] = np.asarray(trials_group['test_light_id'])
+                # Existing DMTS consumers use these compatibility column names.
+                data['SampleSoundId'] = data['SampleLightId']
+                data['TestSoundId'] = data['TestLightId']
+                data['SoundId'] = data['SampleLightId']
+                data['StimulusSource'] = 'LED'
+            for name in trials_group:
+                if name.startswith('dmts_light_'):
+                    values = np.asarray(trials_group[name])
+                    if values.dtype.kind in ('S', 'O'):
+                        values = np.array([v.decode('utf-8') if isinstance(v, bytes) else v
+                                           for v in values])
+                    data[name] = values
             data['SavedOutcome'] = result_by_trial_string
             
             self.results_table = pd.DataFrame(data)

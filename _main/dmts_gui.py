@@ -132,7 +132,10 @@ class DmtsPanel:
         self.dmts_animal_nwb_files = []
         self._dmts_folder_scan_cancel = None
         self._dmts_folder_scan_poll = None
-        ttk.Button(dmts_animal_tab, text="Select mouse folder", command=self._browse_dmts_mouse_folder).pack(anchor="w")
+        input_buttons = ttk.Frame(dmts_animal_tab)
+        input_buttons.pack(fill="x")
+        ttk.Button(input_buttons, text="Select mouse folder", command=self._browse_dmts_mouse_folder).pack(side="left")
+        ttk.Button(input_buttons, text="Load PKL", command=self._load_dmts_batch).pack(side="left", padx=(6, 0))
         ttk.Label(dmts_animal_tab, textvariable=self.dmts_mouse_folder_var, wraplength=300).pack(
             anchor="w", pady=(6, 8))
         ttk.Label(dmts_animal_tab, textvariable=self.dmts_scan_status_var, wraplength=300).pack(anchor="w")
@@ -142,13 +145,13 @@ class DmtsPanel:
         ttk.Checkbutton(dmts_animal_tab, text="Show engaged-only performance", variable=self.dmts_show_engaged_var).pack(anchor="w")
         ttk.Label(dmts_animal_tab, text="Output").pack(anchor="w", pady=(8, 4))
         self.dmts_animal_output = scrolledtext.ScrolledText(
-            dmts_animal_tab, wrap="word", width=32, height=12, font=("Consolas", 10), state="disabled")
+            dmts_animal_tab, wrap="word", width=32, height=12, font=self.app.fonts.tk("output"), state="disabled")
         self.dmts_animal_output.pack(fill="both", expand=True)
 
 
     def _build_dmts_file_controls(self, dmts_file_tab):
         """Build the DMTS file controls and create the plot-settings page."""
-        self.dmts_file_inner_notebook = ttk.Notebook(dmts_file_tab)
+        self.dmts_file_inner_notebook = ttk.Notebook(dmts_file_tab, style="DmtsFile.TNotebook")
         self.dmts_file_inner_notebook.pack(fill="both", expand=True)
         dmts_file_main = ttk.Frame(self.dmts_file_inner_notebook, padding=8)
         dmts_plot_settings = ttk.Frame(self.dmts_file_inner_notebook, padding=8)
@@ -173,7 +176,7 @@ class DmtsPanel:
             anchor="w", pady=(6, 0))
         ttk.Label(dmts_file_main, text="Output").pack(anchor="w", pady=(10, 4))
         self.dmts_file_output = scrolledtext.ScrolledText(
-            dmts_file_main, wrap="word", width=32, height=8, font=("Consolas", 10), state="disabled")
+            dmts_file_main, wrap="word", width=32, height=8, font=self.app.fonts.tk("output"), state="disabled")
         self.dmts_file_output.pack(fill="both", expand=True)
         return dmts_plot_settings
 
@@ -300,14 +303,17 @@ class DmtsPanel:
             if self.dmts_group_exports:
                 self.app._canvas_button(16, 16, "Plot group\naverages", "dmts_groups_plot", "#F3FAF1", "#59A14F", ax=ax)
         elif self.dmts_file_notebook.select() == str(self.dmts_animal_tab):
-            if len(self.dmts_animal_nwb_files) > 1 and self._dmts_folder_scan_poll is None:
+            if (len(self.dmts_animal_nwb_files) > 1 or self.dmts_batch_results) and self._dmts_folder_scan_poll is None:
                 ready = bool(self.dmts_batch_results) and not self._dmts_batch_running
                 for x, y, label, action, enabled in (
                     (16, 16, "Running..." if self._dmts_batch_running else "Batch performance", "dmts_batch", not self._dmts_batch_running),
                     (182, 16, "Plot results", "dmts_batch_plot", ready),
                     (16, 82, "Save data", "dmts_batch_save", ready),
                     (182, 82, "Hit by StimID\nacross sessions", "dmts_batch_stim_hit", ready),
+                    (182, 148, "HIT and CR counts\nper session", "dmts_batch_outcome_counts", ready),
                 ):
+                    if action == "dmts_batch" and len(self.dmts_animal_nwb_files) < 2:
+                        continue
                     if action != "dmts_batch" and not ready:
                         continue
                     self.app._canvas_button(x, y, label, action, "#F3FAF1" if enabled else "#EEEEEE",
@@ -318,23 +324,20 @@ class DmtsPanel:
                                 "dmts_load", "#EEEEEE" if self._dmts_file_busy else "#F7FBFF" if self._dmts_loaded else "#F3FAF1",
                                 "#AAAAAA" if self._dmts_file_busy else "#4C78A8" if self._dmts_loaded else "#59A14F",
                                 enabled=not self._dmts_file_busy, ax=ax)
-            if self._dmts_loaded and "dmts_trial_examples" in self._dmts_file_actions:
-                self.app._canvas_button(16, 82, "Trial Examples", "dmts_trial_examples",
-                                    "#F3FAF1", "#59A14F", enabled=not self._dmts_file_busy, ax=ax)
-            actions = [(82, "Plot Time Window", "dmts_pretraining"),
-                       (148, "Plot Trial-Aligned\nLicks", "dmts_matchonly"),
-                       (214, "Plot Session\nRawdata", "dmts_summary"),
-                       (280, "Performance\nby StimID", "dmts_sound_performance")]
+            actions = [(182, 16, "Plot Session\nRawdata", "dmts_summary"),
+                       (182, 82, "Plot Time Window", "dmts_pretraining"),
+                       (348, 82, "Plot Trial-Aligned\nLicks", "dmts_matchonly"),
+                       (182, 148, "Performance\nby StimID", "dmts_sound_performance"),
+                       (514, 82, "Trial Examples", "dmts_trial_examples")]
             if self._dmts_export_ready:
-                self.app._canvas_button(16, 280, "Export results", "dmts_file_export",
-                                    "#F3FAF1", "#59A14F", enabled=not self._dmts_file_busy, ax=ax)
-            for y, label, action in actions:
+                actions.append((16, 82, "Export results", "dmts_file_export"))
+            for x, y, label, action in actions:
                 if not self._dmts_loaded:
                     continue
                 if action not in self._dmts_file_actions and action != "dmts_file_export":
                     continue
                 enabled = not self._dmts_file_busy
-                self.app._canvas_button(182, y, label, action, "#F3FAF1" if enabled else "#EEEEEE",
+                self.app._canvas_button(x, y, label, action, "#F3FAF1" if enabled else "#EEEEEE",
                                     "#59A14F" if enabled else "#AAAAAA", enabled=enabled, ax=ax)
             csv_ready = bool(getattr(self, "_dmts_csv_trials", None))
             csv_available = bool(self._dmts_voltage_logs())
@@ -345,6 +348,7 @@ class DmtsPanel:
             if csv_ready:
                 self.app._canvas_button(182, 346, "Average voltages\nby StimID", "dmts_csv_average",
                                     "#F3FAF1", "#59A14F", ax=ax)
+        self.app._draw_canvas_connections(self.canvas_ax)
         self.canvas.draw_idle()
 
 
@@ -442,6 +446,44 @@ class DmtsPanel:
                                "DMTS batch performance", "1300x850")
 
 
+    def _load_dmts_batch(self):
+        filename = filedialog.askopenfilename(parent=self.root, title="Load saved DMTS batch data",
+                                              filetypes=[("DMTS batch data", "*.pkl")])
+        if not filename:
+            return
+        try:
+            from dmts_groups import export_curves
+            from dmts_batch import session_sort_key
+            with open(filename, "rb") as source:
+                payload = pickle.load(source)
+            export_curves(payload)
+            sessions = payload["sessions"]
+            if not isinstance(sessions, list) or not sessions:
+                raise ValueError("The export contains no sessions.")
+            for session in sessions:
+                if not {"file", "trials", "total", "match", "nonmatch"}.issubset(session):
+                    raise ValueError("The export is missing DMTS session results.")
+            if any(session.get("session_start_time") for session in sessions):
+                sessions = sorted(sessions, key=session_sort_key)
+        except Exception as exc:
+            messagebox.showerror("Could not load DMTS batch", str(exc), parent=self.root)
+            return
+        self._dmts_batch_generation += 1
+        self._dmts_batch_running = False
+        if self._dmts_folder_scan_cancel is not None:
+            self._dmts_folder_scan_cancel.set()
+        if self._dmts_folder_scan_poll is not None:
+            self.root.after_cancel(self._dmts_folder_scan_poll)
+            self._dmts_folder_scan_poll = None
+        self.dmts_animal_nwb_files = []
+        self.dmts_batch_results = sessions
+        self.dmts_batch_errors = payload.get("errors", [])
+        self.dmts_mouse_folder_var.set(payload.get("mouse_folder") or str(Path(filename).parent))
+        self.dmts_show_engaged_var.set(False)
+        self.dmts_scan_status_var.set(f"Loaded {len(sessions)} sessions from PKL")
+        self._write_dmts_animal_output(f"Loaded DMTS batch data: {filename}\n{len(sessions)} sessions ready for plotting.\n")
+        self._draw_dmts_canvas()
+
     def _save_dmts_batch(self):
         if not self.dmts_batch_results or self._dmts_batch_running:
             return
@@ -483,6 +525,9 @@ class DmtsPanel:
         elif event.artist.get_gid() == "dmts_batch_stim_hit":
             self._plot_dmts_batch_stim_hit()
             return
+        elif event.artist.get_gid() == "dmts_batch_outcome_counts":
+            self._plot_dmts_outcome_counts()
+            return
         if event.artist.get_gid() == "dmts_load":
             self._load_dmts_file()
             return
@@ -505,6 +550,13 @@ class DmtsPanel:
                 self._dmts_file_busy = False
                 self._draw_dmts_canvas()
 
+
+    def _plot_dmts_outcome_counts(self):
+        if self._dmts_batch_running or not self.dmts_batch_results:
+            return
+        from dmts_batch import plot_session_outcome_counts
+        figure = plot_session_outcome_counts(self.dmts_batch_results)
+        self._show_dmts_figure(figure, "DMTS HIT and CR counts per session", "1200x750")
 
     def _plot_dmts_batch_stim_hit(self):
         if self._dmts_batch_running or not self.dmts_batch_results:

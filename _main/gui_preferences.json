@@ -5,5 +5,194 @@
     "subplot_width_px": 500,
     "subplot_height_px": 400,
     "dpi": 100
+  },
+  "fonts": {
+    "controls": {
+      "family": "Segoe UI",
+      "size": 9,
+      "weight": "normal"
+    },
+    "main_title": {
+      "family": "Segoe UI",
+      "size": 14,
+      "weight": "normal"
+    },
+    "main_tabs": {
+      "family": "Segoe UI",
+      "size": 12,
+      "weight": "normal"
+    },
+    "subtabs": {
+      "family": "Segoe UI",
+      "size": 10,
+      "weight": "normal"
+    },
+    "dmts_file_tabs": {
+      "family": "Segoe UI",
+      "size": 10,
+      "weight": "normal"
+    },
+    "output": {
+      "family": "Consolas",
+      "size": 10,
+      "weight": "normal"
+    },
+    "lever_output": {
+      "family": "Segoe UI",
+      "size": 9,
+      "weight": "normal"
+    },
+    "console_title": {
+      "family": "Segoe UI",
+      "size": 13,
+      "weight": "bold"
+    },
+    "console_input": {
+      "family": "Consolas",
+      "size": 11,
+      "weight": "normal"
+    },
+    "guide_title": {
+      "family": "Segoe UI",
+      "size": 18,
+      "weight": "bold"
+    },
+    "guide_heading": {
+      "family": "Segoe UI",
+      "size": 12,
+      "weight": "bold"
+    },
+    "guide_body": {
+      "family": "Segoe UI",
+      "size": 11,
+      "weight": "normal"
+    },
+    "canvas_buttons": {
+      "family": "DejaVu Sans",
+      "size": 8,
+      "weight": "bold"
+    },
+    "canvas_table": {
+      "family": "DejaVu Sans",
+      "size": 9,
+      "weight": "normal"
+    },
+    "canvas_message": {
+      "family": "DejaVu Sans",
+      "size": 13,
+      "weight": "normal"
+    },
+    "canvas_loading": {
+      "family": "DejaVu Sans",
+      "size": 16,
+      "weight": "bold"
+    },
+    "canvas_hint": {
+      "family": "DejaVu Sans",
+      "size": 11,
+      "weight": "normal"
+    }
+  },
+  "canvas_connections": {
+    "enabled": true,
+    "color": "#8A9BAE",
+    "width": 1.4,
+    "arrow": false,
+    "show_ports": true,
+    "port_radius_px": 3,
+    "port_color": "#6289B1",
+    "port_offset_px": 10,
+    "tabs": {
+      "Go/noGo": {
+        "Folder or File": [
+          {
+            "from": "run_session",
+            "to": "session_console"
+          },
+          {
+            "from": "run_session",
+            "to": "plot_ir_occupancy_by_sound"
+          },
+          {
+            "from": "run_session",
+            "to": "plot_performance"
+          },
+          {
+            "from": "run_session",
+            "to": "plot_hit_by_sound"
+          }
+        ],
+        "Animal": [
+          {
+            "from": "run_all_nwb",
+            "to": "plot_batch_session_performance"
+          },
+          {
+            "from": "run_all_nwb",
+            "to": "export_batch_data"
+          },
+          {
+            "from": "run_all_folders",
+            "to": "plot_batch_session_performance"
+          },
+          {
+            "from": "run_all_folders",
+            "to": "export_batch_data"
+          }
+        ],
+        "Groups": []
+      },
+      "DMTS": {
+        "File": [
+          {
+            "from": "dmts_load",
+            "to": "dmts_summary"
+          },
+          {
+            "from": "dmts_load",
+            "to": "dmts_pretraining"
+          },
+          {"from": "dmts_load",
+           "to": "dmts_sound_performance"
+          }
+        ],
+        "Animal": [
+          {
+            "from": "dmts_batch",
+            "to": "dmts_batch_plot"
+          },
+          {
+            "from": "dmts_batch",
+            "to": "dmts_batch_save"
+          },
+          {
+            "from": "dmts_batch",
+            "to": "dmts_batch_stim_hit"
+          },
+          {
+            "from": "dmts_batch",
+            "to": "dmts_batch_outcome_counts"
+          }
+        ],
+        "Groups": []
+      },
+      "Lever": {
+        "File": [
+          {
+            "from": "lever_load",
+            "to": "lever_plot"
+          },
+          {
+            "from": "lever_load",
+            "to": "lever_crossing"
+          }
+        ]
+      }
+    }
+  },
+  "canvas_layout": {
+    "starting_margin_px": 15,
+    "horizontal_gap_px": 25,
+    "vertical_gap_px": 25
   }
 }

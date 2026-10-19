@@ -196,7 +196,8 @@ def lever_mean_sem(matrix):
     return mean, sem
 
 
-def plot_lever_trials(data, channel, go_label="Go", test_label="Test", plot_layout=None, window_s=None):
+def plot_lever_trials(data, channel, go_label="Go", test_label="Test", plot_layout=None, window_s=None,
+                      cmap_name='seismic', cmap_min=None, cmap_max=None):
     """Plot recorded signal, preserving trial order and masking outside each trial."""
     labels = np.asarray([str(v).strip().casefold() for v in data['labels']])
     go_label, test_label = go_label.strip().casefold(), test_label.strip().casefold()
@@ -234,10 +235,15 @@ def plot_lever_trials(data, channel, go_label="Go", test_label="Test", plot_layo
     grid = figure.add_gridspec(2, 3)
     axes = [figure.add_subplot(grid[:, 0]), figure.add_subplot(grid[:, 1])]
     averages = [figure.add_subplot(grid[0, 2]), figure.add_subplot(grid[1, 2])]
-    from matplotlib.colors import TwoSlopeNorm
+    from matplotlib.colors import TwoSlopeNorm, Normalize
     radius = max(abs(low - 2.5), abs(high - 2.5), 0.001)
-    norm = TwoSlopeNorm(vmin=2.5-radius, vcenter=2.5, vmax=2.5+radius)
-    cmap = colormaps['seismic'].with_extremes(bad='#eeeeee')
+    color_min = 2.5-radius if cmap_min is None else float(cmap_min)
+    color_max = 2.5+radius if cmap_max is None else float(cmap_max)
+    if not np.isfinite([color_min, color_max]).all() or color_min >= color_max:
+        raise ValueError('Colour limits must be finite numbers, with minimum below maximum.')
+    norm = (TwoSlopeNorm(vmin=color_min, vcenter=2.5, vmax=color_max)
+            if color_min < 2.5 < color_max else Normalize(vmin=color_min, vmax=color_max))
+    cmap = colormaps[cmap_name].with_extremes(bad='#eeeeee')
     for ax, avg_ax, indices, title in zip(axes, averages, groups, ('GO', 'Test')):
         avg_ax.set(title=f'{title}: mean ± SEM', xlabel='Time from trial start (s)',
                    ylabel=f'{channel} ({unit})' if unit else channel,
@@ -305,14 +311,26 @@ class LeverPanel:
         self.go_label = tk.StringVar(value="Go")
         self.test_label = tk.StringVar(value="Test")
         self.window_s = tk.StringVar(value="5")
+        self.cmap_name = tk.StringVar(value='seismic')
+        self.cmap_min = tk.StringVar(value='')
+        self.cmap_max = tk.StringVar(value='')
         for text, variable in (("GO trial label", self.go_label), ("Test trial label", self.test_label),
-                               ("Plot window (s)", self.window_s)):
+                               ("Plot window (s)", self.window_s),
+                               ("Colour minimum", self.cmap_min), ("Colour maximum", self.cmap_max)):
             row = ttk.Frame(settings)
             row.pack(fill="x", pady=2)
             ttk.Label(row, text=text).pack(side="left")
             ttk.Entry(row, textvariable=variable, width=10).pack(side="right")
+        row = ttk.Frame(settings)
+        row.pack(fill='x', pady=2)
+        ttk.Label(row, text='Colour map').pack(side='left')
+        ttk.Combobox(row, textvariable=self.cmap_name, values=sorted(colormaps),
+                     state='readonly', width=14).pack(side='right')
+        ttk.Label(settings, text='Blank limits = automatic.\nCentred at 2.5 V when within limits.',
+                  wraplength=280).pack(anchor='w', pady=(4, 0))
         ttk.Label(left, text="Output").pack(anchor="w", pady=(10, 4))
-        self.output = scrolledtext.ScrolledText(left, width=32, height=8, wrap="word", state="disabled")
+        self.output = scrolledtext.ScrolledText(left, width=32, height=8, wrap="word",
+                                              font=app.fonts.tk("lever_output"), state="disabled")
         self.output.pack(fill="both", expand=True)
         ttk.Label(right, text="Plot").pack(anchor="w")
         figure = Figure(figsize=(6.5, 4.2), dpi=100)
@@ -343,7 +361,9 @@ class LeverPanel:
             else:
                 figure = plot_lever_trials(self.data, self.channel.get(), self.go_label.get(),
                                       self.test_label.get(), self.app.preferences.get('plot_layout', {}),
-                                      window_s=float(self.window_s.get()))
+                                      window_s=float(self.window_s.get()), cmap_name=self.cmap_name.get(),
+                                      cmap_min=float(self.cmap_min.get()) if self.cmap_min.get().strip() else None,
+                                      cmap_max=float(self.cmap_max.get()) if self.cmap_max.get().strip() else None)
         except Exception as exc:
             messagebox.showerror('Lever plot', str(exc), parent=self.root)
             return
@@ -389,6 +409,7 @@ class LeverPanel:
             if loaded and np.any(np.isfinite(self.data.get('events', {}).get('crossing_duration_s', []))):
                 self.app._canvas_button(182, 82, 'Plot Crossing Distribution', 'lever_crossing',
                                         '#F3FAF1', '#59A14F', ax=self.ax)
+        self.app._draw_canvas_connections(self.ax)
         self.canvas.draw_idle()
 
     def load(self):

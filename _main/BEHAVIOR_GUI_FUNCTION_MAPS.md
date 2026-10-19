@@ -1,447 +1,378 @@
-# Behavior GUI Function Maps
+# Behavior GUI v10 Function Maps
 
-Verified against the current local source on **2026-10-06**, including the DMTS Animal/batch additions in the v9 source saved at 12:48 local time.
+Verified against the local source on **2026-10-16**. Entry point: `behavior_gui_v10.py`. This is a source-level workflow map, not a record of an interactive GUI test. Unqualified Go/NoGo methods belong to `ScanMediaFoldersApp`; DMTS methods belong to `DmtsPanel`; Lever methods belong to `LeverPanel`.
 
-Scope: `behavior_gui_v9.py` and its analysis/plotting modules in this directory. This is a source-level map, not a record of an interactive GUI test. Function names below are actual source entry points; indented descriptions summarize their behavior.
+## Modules and Ownership
 
-## Version and Main Files
+| File | Responsibility |
+| --- | --- |
+| `behavior_gui_v10.py` | Application shell, Go/NoGo UI, discovery, session/batch processing, Groups, console, terminal runners |
+| `dmts_gui.py` | Independent `DmtsPanel`, held as `app.dmts`; File, Animal and Groups workflows |
+| `lever_gui.py` | Independent `LeverPanel`; NWB loading, trial viewer and lever plots |
+| `gui_fonts.py` | `GuiFonts`: shared Tk/Matplotlib font configuration |
+| `behavior_functions.py` | Session loaders, response/performance analysis and batch helpers |
+| `behavior_plots.py` | Go/NoGo session, trial, batch, group and offline learning plots |
+| `dmts_analysis.py` | Dual-lick scoring, timing/coverage provenance and trial plots |
+| `dmts_pretraining.py` / `dmts_matchonly.py` | Time-window and trial-aligned lick plots |
+| `dmts_summary.py` / `dmts_trial_examples.py` | Saved-outcome summaries, StimID performance and example trials |
+| `dmts_batch.py` | Session summaries, chronological ordering, engagement and batch plots |
+| `dmts_blanks.py` | Blank-response validity, summaries and rolling rates |
+| `dmts_groups.py` | DMTS export validation, rolling curves and equal-file group means |
+| `dmts_voltage_viewer.py` | CSV presentation parsing, voltage grids and stimulus averages |
+| `nwb_obj.py` | `session_data_nwb` reader |
+| `gui_preferences.json` | Guide preference, default NWB folder, plot layout and fonts |
+| `Launch Behavior_GUI.bat` | Launches highest numeric `behavior_gui_v*.py` version using local environment |
+| `NWB_BEHAVIOR_GUI_DATA_CONTRACT.md` | Companion data-contract document |
 
-- `behavior_gui_v8.py`: retained baseline; this map describes v9.
-- `behavior_gui_v9.py`: active GUI, input discovery, batch processing, Groups, DMTS controls, session console, and terminal runners.
-- `behavior_functions.py`: session loading, performance extraction, response analysis, and batch helpers.
-- `behavior_plots.py`: session/trial plots, batch rolling curves, group averages, and offline learning/threshold helpers.
-- `dmts_analysis.py`: dual-channel lick detection, DMTS scoring, and DMTS trial plots.
-- `dmts_pretraining.py`: pretraining signal/lick plots.
-- `dmts_matchonly.py`: MatchOnly plots and lick-event/histogram/trial-order tables.
-- `dmts_summary.py`: session summary with adjustable rolling window.
-- `dmts_batch.py`: saved-outcome DMTS session summaries and batch learning curves.
-- `nwb_obj.py`: NWB session reader (`session_data_nwb`).
-- `gui_preferences.json`: saved guide preference and configuration, including default NWB folder and plot layout.
-- `NWB_BEHAVIOR_GUI_DATA_CONTRACT.md`: companion NWB data-contract document.
-
-V9 now includes substantial functionality beyond the original v8 copy: automatic animal grouping, rolling batch performance, PKL export, Groups, DMTS, session inspection, and reset/result-generation handling.
-
-## Startup and UI Layout
+## Startup and UI Assembly
 
 ```text
 main()
 ├─ parses CLI arguments
-├─ --nogui -> terminal runners (see Terminal Map)
+├─ --nogui -> terminal runners (below)
 └─ GUI mode
-   ├─ checks GUI dependencies
-   ├─ destroys stale default Tk root / closes plots on reruns
-   ├─ creates tk.Tk()
+   ├─ checks dependencies; clears stale Tk/Matplotlib state on rerun
+   ├─ root = tk.Tk()
    ├─ ScanMediaFoldersApp(root, initial_folder, initial_file)
-   │  ├─ sets title "BEHAVIOR v9" and window dimensions
-   │  ├─ initializes input, animal-discovery, batch, Groups, and viewer state
-   │  ├─ initializes scan_generation and session-console state
-   │  ├─ reads gui_preferences.json
+   │  ├─ title BEHAVIOR v10; input/batch/Groups/viewer/console state
+   │  ├─ reads preferences; GuiFonts(preferences).apply(root)
    │  ├─ _build_ui()
-   │  └─ connects input traces -> _sync_current_input_label()
-   ├─ if show_guide_at_startup: schedules _show_getting_started()
+   │  └─ input traces -> _sync_current_input_label()
+   ├─ optional _show_getting_started() scheduled after idle
    └─ root.mainloop()
+
+ScanMediaFoldersApp._build_ui()
+├─ _build_menu() / _build_main_tabs()
+├─ _build_gonogo_layout(): Folder or File / Animal / Groups
+├─ _build_gonogo_groups_controls() / _build_gonogo_input_controls()
+├─ _build_gonogo_animal_controls() / _build_gonogo_output()
+├─ _build_gonogo_canvas()
+├─ DmtsPanel(self): File / Animal / Groups
+│  └─ File contains Main / Plot settings
+├─ _build_lever_panel() -> LeverPanel(self): File
+└─ _configure_layout_reporting()
 ```
 
-```text
-_build_ui()
-├─ Help -> Getting started -> _show_getting_started()
-├─ Go/noGo main tab
-│  ├─ Folder or File subtab: session input and hit source
-│  ├─ Animal subtab: NWB discovery / detected animal / raw-folder discovery
-│  ├─ Groups subtab: PKL files and group assignments
-│  └─ input controls, Plot canvas, and Output panels
-└─ DMTS main tab
-   ├─ File subtab: NWB selection, trial viewer, pretraining / MatchOnly / summary
-   └─ Animal subtab: mouse-folder scan, batch performance, Plot results, Save data
+`_select_gonogo_layout()` switches Go/NoGo input panels and shows the full-width Groups table only on that subtab; `_restore_groups_table_height()` restores its splitter position. Help opens the guide, and `_save_guide_preference()` persists its startup preference. `GuiFonts.tk()` / `mpl()` supply configured font sections for controls, notebooks, output, console, guide and canvas text.
 
-_select_gonogo_layout()
-├─ switches input-control panels with the selected subtab
-└─ shows the full-width Groups table only for Groups
-   └─ _restore_groups_table_height() restores its splitter position
-```
-
-The Getting Started window is also available through Help. `_save_guide_preference()` persists its startup preference. The previous startup workflow-map description no longer applies.
-
-## Input Selection and Reset
+## Go/NoGo Input, Detection and Reset
 
 ```text
-_browse_folder() / _browse_nwb()
-└─ select input and update active-input state
+_browse_folder() -> select folder; manual IR/Licks source
+_browse_nwb() -> select file -> _detect_nwb_hit_source()
+├─ reads acquisition/Parameters key/value metadata with h5py
+├─ _normalize_trigger_type(): IR/infrared/irfork -> IR; lick/licks -> Licks
+└─ unknown/missing metadata -> clears source; requires manual selection
+_manual_hit_source() -> override status; rerun applies selection
 
 _reset_session()
 ├─ closes session console and trial viewer
-├─ increments scan_generation (invalidates prior worker callbacks)
-├─ clears single-session and batch results / selected inputs
-├─ disables trial viewer
-└─ clears main canvas
+├─ increments scan_generation; invalidates old worker callbacks
+├─ clears session/batch results and input state
+└─ disables viewer and clears canvas
 ```
 
-Reset invalidates old results; it does not terminate an already running worker thread.
+Reset does not forcibly terminate a worker. Automatic source detection is attached to single-file browsing; batch loops use the current source selection, not per-file metadata detection.
 
-## Animal / NWB Discovery
+## Go/NoGo Animal Discovery
 
 ```text
-Find NWB files -> _find_nwb_files_for_animal()
-├─ asks for root folder (using configured default_nwb_folder)
-├─ resets session and previous discovery state
-├─ recursively collects files with .nwb suffix, case-insensitively
-├─ _group_nwb_files(paths)
-│  └─ _infer_animal_name_from_nwb_filename()
-├─ stores nwb_scanned_files, nwb_search_root, and nwb_groups
-├─ populates Detected animal selector
-└─ logs unidentified files; waits for animal selection
-
-Detected animal selection -> _select_nwb_group()
-├─ resets session results
-├─ sets animal_var and found_nwb_files for that animal
-└─ logs files and redraws Animal canvas
-
-Manual animal search -> _search_nwb_animal_override()
-├─ requires an already scanned root and an animal name
-├─ case-insensitive substring search over every scanned full path
-│  └─ includes paths excluded from automatic animal grouping
-└─ sets sorted found_nwb_files and redraws Animal canvas
-
-Find folders -> _find_session_folders_for_animal()
-└─ uses _find_session_folders_for_animal(folder_root, animal_name)
+_find_nwb_files_for_animal()
+├─ choose root; recursively collect .nwb files case-insensitively
+├─ _group_nwb_files() -> _infer_animal_name_from_nwb_filename()
+├─ store nwb_scanned_files, nwb_search_root, nwb_groups
+└─ populate Detected animal; report unidentified files
+_select_nwb_group()
+└─ reset session; set animal_var and found_nwb_files; redraw
+_search_nwb_animal_override()
+└─ case-insensitive full-path search over all scanned files,
+   including files automatic grouping could not identify
+_find_session_folders_for_animal() [method]
+└─ _find_session_folders_for_animal(root, animal) [module helper]
    └─ _is_session_folder() identifies raw session folders
 ```
 
-The GUI discovery flow groups all detected animals first. It no longer infers one animal and immediately selects the first NWB as the current single-session input. The standalone `find_nwb_files_for_animal()` helper remains available to batch code.
+Automatic NWB discovery waits for animal selection. The standalone `find_nwb_files_for_animal()` helper is also used by batch code.
 
-## Single Session Processing
+## Go/NoGo Single Session and Response Dispatch
 
 ```text
 Run canvas action -> _start_scan()
-├─ validates folder/file and resolves active_input
-├─ sets running state and captures hit source / scan_generation
-└─ starts daemon worker -> _run_scan_worker(path, hit_source, generation)
+├─ validate input, resolve active_input, require IR or Licks
+└─ daemon thread -> _run_scan_worker(path, source, generation)
    ├─ load_session_data_fromFolder() OR load_session_data_fromFile()
-   ├─ extract_performance(session)
-   ├─ analyze_session_responses(session, hit_source)
-   └─ root.after() -> _deliver_scan_result(generation, callback, ...)
-      ├─ ignores callbacks from an obsolete generation
-      ├─ success -> _handle_scan_success()
-      │  ├─ stores session data, performance, hit-by-sound and response outputs
-      │  ├─ logs analysis results and enables trial viewer
-      │  └─ redraws selected-input canvas
-      └─ failure -> _handle_scan_error()
-```
+   ├─ extract_performance()
+   ├─ analyze_session_responses()
+   └─ root.after() -> _deliver_scan_result()
+      ├─ ignore obsolete generation
+      ├─ _handle_scan_success(): store outputs, log, enable viewer, redraw
+      └─ _handle_scan_error(): report failure
 
-```text
 analyze_session_responses(session, hit_source)
-├─ is_dmts_lick(session)?
-│  └─ analyze_dmts(session) -> (None, None, DMTS hit_by_sound)
-└─ otherwise detect_ir_events(session["dataIR"]["full"])
-   ├─ hit_source == "Licks"
-   │  ├─ analyze_lick_events_by_trial()
-   │  └─ extract_hit_by_sound_licks() -> (None, None, hit_by_sound)
-   └─ IR mode
-      ├─ analyze_ir_by_trial()
-      └─ extract_hit_by_sound_IR() -> (events, trial_analysis, hit_by_sound)
+├─ is_dmts_lick() -> analyze_dmts() -> (None, None, DMTS hit_by_sound)
+└─ detect_ir_events(session["dataIR"]["full"])
+   ├─ Licks -> analyze_lick_events_by_trial() -> extract_hit_by_sound_licks()
+   │  └─ returns (None, None, hit_by_sound)
+   └─ IR -> analyze_ir_by_trial() -> extract_hit_by_sound_IR()
+      └─ returns (events, trial_analysis, hit_by_sound)
 ```
 
-Licks mode counts signal events; it does not return IR occupancy outputs. Dual-lick DMTS recognition takes precedence over the selected hit source.
+Licks mode counts signal events and does not return IR occupancy outputs. Dual-lick DMTS recognition takes precedence over the chosen source.
 
-## Performance Computation
+`extract_performance()` dispatches dual-lick DMTS to `analyze_dmts()`. Otherwise it requires a nonempty ResultsTable, normalizes TrialType (Eya fallback: SoundId 1 -> Go and 16 -> NoGo; generic fallback: SoundId), and persists TrialType. Go uses Hit, NoGo uses CR. Results `go`, `nogo`, `total` are percentages rounded to two decimals, alongside `n_go` and `n_nogo`. No Go raises an error; no NoGo gives `nogo=NaN` and `total=go`; otherwise total is the balanced mean of Go and NoGo percentages.
 
-```text
-extract_performance(session)
-├─ dual-lick DMTS -> analyze_dmts(session)["performance"]
-└─ standard Go/NoGo
-   ├─ requires a nonempty ResultsTable
-   ├─ reads numeric TrialType; if absent/invalid, rebuilds from SoundId
-   │  ├─ Eya fallback: SoundId 1 -> Go, 16 -> NoGo
-   │  └─ generic fallback: SoundId values become TrialType
-   ├─ persists normalized TrialType in ResultsTable
-   ├─ Go mask: TrialType == SOUND_ID_GO
-   ├─ NoGo mask: TrialType == SOUND_ID_NOGO
-   ├─ no Go trials -> raises ValueError
-   ├─ go = 100 * Go hits / n_go, rounded to 2 decimals
-   ├─ no NoGo trials -> nogo = NaN; total = go
-   └─ otherwise nogo = 100 * NoGo CR / n_nogo;
-      total = mean(go, nogo), rounded to 2 decimals
-```
-
-Returned standard keys are `go`, `nogo`, `total`, `n_go`, and `n_nogo`. Performance values are percentages, not fractions. Total is a balanced Go/NoGo mean, not an overall trial-weighted accuracy.
-
-## GUI Batch Processing and Learning Curve
+## Go/NoGo Batch and Rolling Curve
 
 ```text
 _run_all_found_nwb_files() / _run_all_found_session_folders()
-├─ reset batch dictionaries
-└─ for each selected NWB file / session folder
-   ├─ load_session_data_fromFile() / load_session_data_fromFolder()
-   ├─ extract_performance()
-   ├─ analyze_session_responses()
+├─ clear batch dictionaries
+└─ for each selected input
+   ├─ load -> extract_performance() -> analyze_session_responses()
    ├─ store batch_performance_by_file
-   ├─ derive correctness from ResultsTable
-   │  ├─ standard: Go uses Hit; NoGo uses CR
-   │  └─ DMTSOutcome override: Hit/Correct -> 1;
-   │     Miss/FalseAlarm -> 0; other outcomes -> NaN
-   ├─ store trial_type and correct in batch_trial_performance_by_file
-   ├─ _append_trials_by_sound_id() -> batch_trials_by_sound_id
-   ├─ _merge_hit_by_sound() -> batch_hit_by_sound
+   ├─ build trial correctness: Go Hit / NoGo CR
+   │  └─ DMTSOutcome override: Hit/Correct=1, Miss/FalseAlarm=0, other=NaN
+   ├─ store batch_trial_performance_by_file (trial_type, correct)
+   ├─ _append_trials_by_sound_id() / _merge_hit_by_sound()
    └─ log success or per-session error
-```
 
-These Go/NoGo GUI batch loops run in their handlers; the single-session worker-thread map does not describe them. DMTS Animal batch processing uses a separate background worker (see below).
-
-```text
 _draw_selected_input_box()
-├─ Groups selected -> _draw_groups_canvas()
-├─ Animal selected -> _draw_animal_canvas()
-└─ otherwise draws single-session input / available analysis actions
-
-Batch performance canvas action
-└─ _handle_main_canvas_pick()
-   └─ _open_batch_session_performance_plot()
-      └─ plot_batch_session_performance(
-           batch_performance_by_file,
-           trial_performance_by_file=batch_trial_performance_by_file,
-           plot_layout=preferences["plot_layout"], show=True, block=False)
-         ├─ naturally sorts session names; skips error entries
-         ├─ panel 1: Go / NoGo / Total per session
-         └─ when trial data is supplied
-            ├─ panel 2: trial correctness with session boundaries
-            └─ panel 3: trailing 25-trial Go / NoGo / Total percentages
-               └─ batch_rolling_trial_data()
+├─ Groups -> _draw_groups_canvas()
+├─ Animal -> _draw_animal_canvas()
+└─ single-session actions
+_handle_main_canvas_pick() -> _open_batch_session_performance_plot()
+└─ plot_batch_session_performance()
+   ├─ natural session-name sorting; skip error entries
+   ├─ session Go/NoGo/Total panel
+   └─ with trial data: correctness panel and rolling performance panel
+      └─ batch_rolling_trial_data(window=25)
 ```
 
-`batch_rolling_trial_data()` concatenates trials in plot order. Its trailing window includes the current trial, crosses session boundaries, and uses available trials for initial windows. Go and NoGo percentages use valid outcomes of each type within that window of 25 total trials. Rolling total is the mean of the available Go and NoGo percentages. Trial indices are zero-based.
+Go/NoGo batch loops execute in their GUI handlers, unlike the threaded DMTS batch. Rolling windows include the current trial, cross session boundaries and use available initial trials. Each window spans 25 total trials; category percentages use finite outcomes of that category within the window. Total averages available Go/NoGo percentages. Indices are zero-based. Batch/group layout accepts `dpi`, `subplot_width_px`, `subplot_height_px` preferences with validated defaults.
 
-Batch and group figures accept `plot_layout` settings `dpi`, `subplot_width_px`, and `subplot_height_px`; invalid/nonpositive values fall back to defaults.
-
-## Batch PKL Export and Groups
+## Go/NoGo Export and Groups
 
 ```text
-Export batch data (.pkl) -> _export_batch_data()
-├─ asks for output filename
-├─ computes batch_rolling_trial_data(..., window=25)
-└─ pickles schema_version=1 payload
-   ├─ animal_name
-   ├─ performance_by_file
-   ├─ trial_performance_by_file
-   ├─ trials_by_sound_id
-   ├─ hit_by_sound
-   └─ rolling_trial_data
-```
+_export_batch_data()
+└─ schema_version=1 PKL:
+   animal_name, performance_by_file, trial_performance_by_file,
+   trials_by_sound_id, hit_by_sound, rolling_trial_data
 
-Rolling data includes trial/session indices, trial types, correctness, Go/NoGo/Total percentages, and metadata describing the window and alignment.
-
-```text
-Groups: Select PKL folder -> _load_group_folder()
-├─ clears loaded exports and assignments
-├─ _read_group_export(path) validates expected schema / rolling data
-├─ populates animal / file / session count / trial count / group table
-└─ reports loaded and skipped files
-
+_load_group_folder() -> _read_group_export() -> file/animal/counts table
 _assign_selected_group() / _remove_selected_group()
-└─ update assignments -> _refresh_group_assignments()
-
+└─ _refresh_group_assignments()
 _save_group_assignments() / _load_group_assignments()
-└─ separate JSON mapping using paths relative to the selected PKL folder
-   (does not rewrite PKL analysis files)
-
-Plot group averages -> _open_group_average_plot()
-└─ plot_group_average_performance(exports, assignments, plot_layout=...)
-   └─ group_animal_curves()
-      ├─ ignores unassigned files
-      ├─ validates 25-trial rolling data and zero-based sequential indices
-      ├─ rejects an animal assigned to more than one group
-      ├─ averages multiple exports of the same animal first
-      └─ _mean_aligned_curves() averages available finite values by trial index
+└─ separate JSON mapping of relative file paths to group names
+_open_group_average_plot() -> plot_group_average_performance()
+└─ group_animal_curves() -> _mean_aligned_curves()
 ```
 
-Group plots show grey individual-animal curves and colored group means for Go, NoGo, and Total. Alignment is by cumulative trial index; shorter curves contribute only where data exist. The Groups loader expects the Go/NoGo GUI schema_version=1 export, not arbitrary PKL dictionaries, terminal batch JSON, or the separate DMTS dmts_batch_v1 export.
+Rolling exports include trial/session indices, correctness, percentages and window metadata. Groups requires this schema and 25-trial rolling data, ignores unassigned files, rejects cross-group assignments for the same animal, averages duplicate-animal exports first, then averages available animals by cumulative trial index. Grey curves represent animals; colored curves represent group means. DMTS PKLs use a different schema and loader.
 
-## Session Plots, Trial Viewer, and Console
+## Go/NoGo Plots, Viewer and Console
 
-| GUI handler | Plot / action |
+| Handler | Target |
 | --- | --- |
 | `_open_performance_plot()` | `plot_performance()` |
 | `_open_ir_occupancy_plot()` | `plot_ir_occupancy_by_sound()` |
 | `_open_hit_by_sound_plot()` | `plot_hit_by_sound()` |
-| `_open_trial_viewer()` | Builds trial navigation window |
-| `_change_trial()` / `_render_trial_viewer_plot()` | `plot_trial_ir_and_sound()` for selected zero-based trial |
-| `_open_session_console()` | Opens Python session-inspection console |
-| `_execute_session_command()` | Executes commands and displays final expression/output/errors in Output |
+| `_open_trial_viewer()` / `_change_trial()` / `_render_trial_viewer_plot()` | Zero-based navigation with `plot_trial_ir_and_sound()` |
+| `_update_plots()` | `plot_session_visualizations()` |
+| `_open_session_console()` / `_execute_session_command()` | Python commands and final expression results in Output |
 
-The console exposes NumPy as `np` and the five `single_session_*` data/analysis objects. Commands can modify data and files. Its namespace persists for the loaded session and is reset when the session changes.
+The console exposes `np` and five `single_session_*` objects, retains a namespace for the loaded session, and resets on session change. Commands can modify session data and files.
 
-`_update_plots()` also wraps `plot_session_visualizations()` for the combined plot set. Figure saving is available through plot toolbars where installed; GUI batch PKL and DMTS MatchOnly CSV exports are separate actions.
+## DMTS File Panel
 
-## DMTS Analysis and GUI
-
-```text
-is_dmts_lick(session)
-└─ recognizes TaskType/task_type == DMTS and TriggerType == lick
-
-analyze_dmts(session)
-├─ returns cached session["dmts_analysis"] when present
-├─ reads/validates task timing, minimum lick count, and channel thresholds
-├─ uses LeftLick / RightLick signals and their timing provenance
-├─ crossings() detects threshold events
-├─ score_trial() classifies responses
-└─ stores DMTS analysis used by performance, hit-by-sound, and trial plotting
-```
+All handlers here belong to `dmts_gui.DmtsPanel`, not `ScanMediaFoldersApp`.
 
 ```text
-DMTS Browse NWB -> _browse_dmts_nwb()
-└─ updates DMTS file selection and closes an existing DMTS trial viewer
+DmtsPanel._build_ui()
+├─ _build_dmts_layout()
+├─ _build_dmts_groups_controls() / _build_dmts_animal_controls()
+├─ _build_dmts_file_controls() / _build_dmts_plot_settings()
+└─ _build_dmts_canvas()
 
-_handle_dmts_canvas_pick()
-├─ dmts_pretraining -> _run_dmts_pretraining()
-│  ├─ dmts_pretraining.plot_pretraining(file, settings)
-│  ├─ stores left_lick_times / right_lick_times
-│  └─ _show_dmts_figure()
-├─ dmts_matchonly -> _run_dmts_matchonly()
-│  ├─ load_session_data_fromFile()
-│  ├─ dmts_matchonly.plot_matchonly(session, settings)
-│  ├─ stores lick_events, lick_histogram, trial_order
-│  ├─ _show_dmts_figure()
-│  └─ if Save results enabled: writes three CSV tables into
-│     <NWB stem>_lick_analysis beside the source file
-└─ dmts_summary -> _open_dmts_summary()
-   ├─ loads browsed file (or MatchOnly file fallback)
-   ├─ dmts_summary.plot_session_summary(session, window=25)
-   └─ Update / Enter redraws using selected eligible-trial rolling window
+_browse_dmts_nwb() / _select_dmts_example() -> _select_dmts_file()
+├─ close old trial viewer; clear cached data and export readiness
+├─ inspect NWB datasets -> _dmts_file_actions
+│  ├─ LeftLick + RightLick + Reward -> time-window plot
+│  └─ sample_sound_ids + test_sound_ids + HMCF -> summary/StimID performance
+│     └─ plus both lick signals -> aligned licks/trial examples
+└─ _draw_dmts_canvas() offers Run NWB file
 
-_open_dmts_trial_viewer()
-├─ loads selected DMTS file and analyzes responses with "Licks"
-├─ creates zero-based Go / Previous / Next navigation
-└─ plot_trial_ir_and_sound()
-   └─ DMTS sessions use dmts_analysis.plot_dmts_trial()
+_load_dmts_file()
+├─ daemon worker loads required session and/or pretraining signals
+├─ queue and Tk polling deliver results
+├─ discard result if selected filename/actions changed
+└─ cache _dmts_session / _dmts_loaded_signals; enable supported actions
 ```
 
-DMTS pretraining and MatchOnly settings are read from their GUI controls. Their signal-analysis plots are separate entry points from the general single-session Go/NoGo processing flow.
+`_handle_dmts_canvas_pick()` routes actions with loaded/busy/capability guards. File output and Animal output are separate.
 
-## DMTS Animal Discovery, Batch Analysis, and Export
-
-```text
-DMTS Animal -> Select mouse folder -> _browse_dmts_mouse_folder()
-└─ _start_dmts_folder_scan(folder)
-   ├─ increments _dmts_batch_generation and clears prior batch results/errors
-   ├─ cancels previous folder scan via Event and its scheduled poll
-   ├─ starts daemon worker using os.walk(..., followlinks=False)
-   │  ├─ sorts directories/files case-insensitively
-   │  ├─ finds .nwb files recursively, case-insensitively
-   │  └─ queues progress, paths, warnings, and completion
-   └─ Tk poll every 100 ms drains up to 100 messages
-      ├─ fills dmts_animal_nwb_files and the Animal Output panel
-      ├─ displays folder/file counts and scan warnings
-      └─ _draw_dmts_canvas() updates available actions
-```
-
-Folder discovery lists NWB files without first checking their task type. Non-DMTS or incomplete sessions are skipped during analysis. The canvas shows Animal batch actions only after scanning finishes and more than one NWB file is found. `_write_dmts_animal_output()` appends batch messages to this tab's dedicated output panel.
-
-```text
-_handle_dmts_canvas_pick() (Animal actions)
-├─ dmts_batch -> _run_dmts_batch()
-│  ├─ requires >=2 discovered files, no active scan, and no running batch
-│  ├─ clears results/errors and captures _dmts_batch_generation
-│  ├─ sorts full file paths case-insensitively
-│  ├─ daemon worker, for each path
-│  │  ├─ load_session_data_fromFile()
-│  │  ├─ dmts_batch.summarize_session(session, path)
-│  │  └─ queues result or per-file error, then progress/completion
-│  └─ Tk poll every 100 ms drains up to 100 messages
-│     ├─ fills dmts_batch_results / dmts_batch_errors
-│     ├─ reports progress, session accuracy, and skipped files
-│     └─ enables Plot results / Save data when successful results exist
-├─ dmts_batch_plot -> _plot_dmts_batch()
-│  └─ dmts_batch.plot_batch(results) -> _show_dmts_figure()
-└─ dmts_batch_save -> _save_dmts_batch()
-   └─ asks for .pkl filename and saves the DMTS batch payload
-```
-
-A new mouse-folder scan invalidates previous batch workers and polls using `_dmts_batch_generation`. An in-progress file load is not forcibly interrupted; old results are ignored and the worker checks generation before processing another file. Plot and save handlers require results and a finished batch.
-
-```text
-dmts_batch.summarize_session(session, path)
-├─ requires TaskType/task_type == DMTS
-├─ requires nonempty ResultsTable with SavedOutcome, SampleSoundId, TestSoundId
-├─ classifies each trial
-│  ├─ sample == test == 0 -> blank
-│  ├─ sample == test -> match
-│  └─ otherwise -> nonmatch
-├─ eligible outcomes: Hit / Miss / FalseAlarm / Correct on nonblank trials
-├─ correct: Hit/Correct -> 1; Miss/FalseAlarm -> 0; ineligible -> None
-└─ returns file, trials, total, match, nonmatch
-   └─ percentage correct over eligible trials; no eligible trials -> NaN
-```
-
-This batch path uses **recorded SavedOutcome**, without calling `analyze_dmts()` to rescore lick signals. Overall accuracy pools all eligible trials; it is not the balanced Go/NoGo mean. Trial records contain one-based `trial`, `kind`, `outcome`, `correct`, `sample_id`, and `test_id`.
-
-```text
-dmts_batch.plot_batch(results)
-├─ upper panel: Overall / Match / Non-match accuracy per successful session
-│  └─ sessions remain in file-path order, numbered from 1
-└─ lower panel: rolling performance across sessions
-   ├─ x = one-based cumulative trial number, including ineligible trials
-   ├─ each curve rolls over its own last 25 eligible trials
-   ├─ initial windows use available trials; windows cross session boundaries
-   └─ vertical lines mark session boundaries
-```
-
-Unlike the Go/NoGo rolling curve's 25-total-trial window, the DMTS Match and Non-match curves each use up to 25 eligible trials of that category. Blanks and unknown outcomes do not enter any accuracy denominator, but retain positions on the cumulative trial axis.
-
-`_save_dmts_batch()` defaults to `<mouse-folder-name>_dmts_batch.pkl` and writes:
-
-| Payload key | Value |
+| Action / handler | Target |
 | --- | --- |
-| `format` | `dmts_batch_v1` |
-| `outcome_source` | `saved` |
-| `rolling_window` | `25` |
-| `mouse_folder` | Selected folder path |
-| `sessions` | Successful session summaries, including trial records |
-| `errors` | Skipped-file records containing `file` and `error` |
+| Plot Session Rawdata: `_open_dmts_summary()` | `dmts_summary.plot_session_summary()`; adjustable eligible-trial window |
+| Plot Time Window: `_run_dmts_pretraining()` | `dmts_pretraining.plot_pretraining()`; cached signals and time/threshold/smoothing controls |
+| Plot Trial-Aligned Licks: `_run_dmts_matchonly()` | `dmts_matchonly.plot_matchonly()`; caches events/histogram/trial order |
+| Performance by StimID: `_open_dmts_sound_performance()` | `dmts_summary.plot_performance_by_sound()` |
+| Trial Examples: `_open_dmts_trial_examples()` | `dmts_trial_examples.plot_trial_examples()` |
+| Trial Viewer: `_open_dmts_trial_viewer()` | `plot_trial_ir_and_sound()` -> `plot_dmts_trial()` for DMTS |
+| Export results: `_export_dmts_file_results()` | Explicit CSV export after time-window or aligned analysis |
 
-Rolling arrays are computed when plotting; the export stores trial records and the window size. This format is separate from the Go/NoGo Groups PKL schema and currently has no corresponding GUI import action.
+`_show_dmts_figure()` embeds plots and toolbar. File exports go beside the NWB in `<stem>_lick_analysis`: either `pretraining_lick_events.csv`, or `lick_events.csv`, `lick_histogram.csv` and `trial_order.csv`. Export is a separate action.
 
-## Terminal Map
+## DMTS Scoring Sources
+
+```text
+is_dmts_lick(): TaskType/task_type == DMTS and TriggerType == lick
+analyze_dmts()
+├─ use cached dmts_analysis if available
+├─ validate task timing, thresholds and minimum lick count
+├─ signal_times() / crossings() -> timed response-window events
+├─ score_trial() when signals cover the response window
+├─ saved-outcome fallback for incomplete signals
+└─ store performance, hit-by-sound, trial coverage, outcome provenance,
+   mismatch count and saved-fallback count
+```
+
+General performance/response dispatch uses this analysis. DMTS summary, StimID performance and Animal batch accuracy use recorded `SavedOutcome`. Batch additionally calls `analyze_dmts()` for engagement and blank responses without replacing saved accuracy outcomes.
+
+## DMTS CSV Voltage Tools
+
+```text
+_dmts_voltage_logs() -> sibling CSVs excluding TrialLog.csv / Parameters.csv
+_select_dmts_csv_log()
+└─ only candidate or unique date/time-token match; report ambiguity otherwise
+_load_dmts_csv() -> parse_dmts_log_file() -> _dmts_csv_loaded()
+_open_dmts_voltage_viewer() -> DMTSVoltageViewer
+├─ browse/load, Previous/Next/Go -> update_plot()
+└─ voltages_to_pattern_grid() / draw_voltage_grid()
+_open_dmts_csv_average() -> DMTSVoltageViewer.open_stim_summary()
+└─ voltage_presentations_by_stim() / plot_voltage_stim_summary()
+```
+
+CSV presentation tools are independent of NWB behavioral scoring.
+
+## DMTS Animal Batch
+
+```text
+_browse_dmts_mouse_folder() -> _start_dmts_folder_scan()
+├─ invalidate prior batch generation; clear results/errors
+├─ cancel previous scan Event and scheduled poll
+├─ daemon worker: os.walk(followlinks=False), case-insensitive NWB matching
+└─ Tk queue polling updates files, warnings and progress
+_run_dmts_batch()
+├─ requires >=2 files, finished scan, no running batch
+├─ validates positive silent-match threshold (default 5)
+├─ worker loads paths -> dmts_batch.summarize_session()
+├─ Tk poll collects results/errors and logs engagement/blank summaries
+└─ completion sorts results using session_sort_key()
+```
+
+Workers visit files in path order; plots and exports use timezone-aware NWB `session_start_time`, normalized to UTC. Invalid/naive/missing times go last with file-path tie breaking. Generation checks discard obsolete results; an ongoing file load is not forcibly interrupted.
+
+```text
+summarize_session(session, path, silent_match_threshold=5)
+├─ require DMTS and nonempty SavedOutcome / SampleSoundId / TestSoundId
+├─ classify blank (both IDs zero), match (equal), nonmatch (different)
+├─ correctness: Hit/Correct=1, Miss/FalseAlarm=0, blank/unknown=None
+├─ analyze_dmts() supplies lick counts and window coverage
+├─ add_blank_responses() / blank_summary()
+├─ mark_engagement()
+└─ file, session_start_time, trials, total/match/nonmatch,
+   engagement, blank_response
+```
+
+Accuracy pools eligible saved outcomes. Trial records are one-based. Failed lick analysis preserves saved accuracy and marks engagement unknown with a warning.
+
+`mark_engagement()` allows N silent match trials; disengagement begins at N+1 without backdating. A match with any lick restores engagement; unknown match counts reset to unknown. Other trial kinds inherit state. Summaries include periods, eligible/engaged/unknown counts and engaged accuracy.
+
+Blank responses are separate from accuracy and engagement. A side needs full response-window coverage; either-side validity needs both channels. `blank_rolling()` uses 25 valid blanks per session, independently of engagement filtering.
+
+| Animal action | Target |
+| --- | --- |
+| `_plot_dmts_batch()` | `plot_batch()`; chronological session accuracy, rolling curves, disengagement shading, blank panels |
+| `_plot_dmts_batch_stim_hit()` | `plot_hit_by_stim_sessions()` / `session_hit_rates_by_stim()` |
+| `_plot_dmts_outcome_counts()` | `plot_session_outcome_counts()`; absolute saved HIT/CR counts |
+| `_save_dmts_batch()` | Versioned DMTS PKL |
+| `_load_dmts_batch()` | Validate and restore PKL; cancel obsolete scans/batches |
+
+Accuracy curves use 25 eligible trials per category across sessions, retaining all trial positions on x. Optional engaged-only display adds overall engaged curves to the original curves. Blank windows reset per session.
+
+## DMTS Export and Groups
+
+New exports use `format=dmts_batch_v2`, `outcome_source=saved`, `rolling_window=25`, `session_order=session_start_time`, plus `mouse_folder`, sorted `sessions` and `errors`. Trial records include engagement/blank information. Rolling arrays are calculated from records when plotting.
+
+```text
+_load_dmts_batch() / _load_dmts_groups()
+└─ dmts_groups.export_curves() accepts dmts_batch_v1 and dmts_batch_v2
+   ├─ timestamp ordering when timestamps exist; otherwise stored order
+   └─ engaged-only mode requires engagement flags
+
+DMTS Groups: _load_dmts_groups()
+├─ load PKLs directly in selected folder; validate/report skipped files
+└─ default group "All files"
+_assign_dmts_group() -> selected files; empty name means All files
+_plot_dmts_groups() -> dmts_groups.plot_groups()
+├─ export_curves(): overall/match/nonmatch rolling curves, optional filter
+├─ forward-fill within each export's recorded span
+├─ separate per-session blank curves, independent of engagement filter
+└─ mean_curves(): equal-file means and finite contributor counts
+```
+
+Thin curves represent PKLs; bold curves represent group means. Optional blank panels appear when valid blank data exist. Short recordings do not extend beyond their span. `dmts_group_averages` retains means and contributor counts. Unlike Go/NoGo Groups, DMTS Groups averages files without deduplicating animals and has no assignment save/load handlers.
+
+## Lever Panel
+
+```text
+_build_lever_panel() -> LeverPanel(app)
+├─ browse(): select NWB, increment generation, clear data/viewer
+├─ draw() / on_pick(): lever_load, lever_plot, lever_crossing
+├─ load(): daemon worker -> load_lever_file(); Tk queue polling
+│  ├─ ignore obsolete generations
+│  ├─ populate channel and inferred Go/Test labels
+│  └─ enable viewer if trial timing exists
+├─ open_plot()
+│  ├─ plot_lever_trials() -> Go/Test heatmaps and mean/SEM traces
+│  │  └─ lever_mean_sem()
+│  └─ distribution=True -> plot_crossing_distribution()
+└─ open_viewer(): trial navigation, recorded signals and event annotations
+```
+
+`load_lever_file()` reads supported numeric signals with h5py, validates timestamp/start-rate timing, and applies conversion/offset metadata. Trial intervals come from `intervals/trials`, falling back to rising TrialType==99 anchors. Missing stops extend to the next anchor or signal end. Recorded labels and task sound-ID parameters determine Go/Test defaults.
+
+Event fields are `trigger_time_s`, `crossing_duration_s`, `trial_end_s`. Missing values can be filled from sibling `TrialLog.csv` only on a unique unused trigger match within 0.101 s. Otherwise markers remain missing. The viewer interprets hold/release modes from task parameters. Across-trial plots use selected channel, editable labels and positive window duration, preserve trial order, and mask samples outside trial limits. Lever does not use the Go/NoGo or DMTS scoring pipeline.
+
+## Terminal Runners
 
 ```text
 main() --nogui
 ├─ --batch-folder -> run_nogui_folder_batch()
-│  ├─ discover raw session folders
-│  ├─ _process_batch_session() per folder
-│  └─ write <animal>_folder_batch_performance.json
+│  ├─ discover folders -> _process_batch_session()
+│  └─ <animal>_folder_batch_performance.json
 ├─ --batch-nwb -> run_nogui_nwb_batch()
 │  ├─ behavior_functions.run_nwb_batch_analysis()
-│  └─ write <animal>_nwb_batch_performance.json
-└─ otherwise -> run_nogui()
-   ├─ load session; extract_performance(); analyze_session_responses()
-   ├─ write results-table CSV and summary JSON
-   └─ --show-plots: generate and save PNGs using the Agg backend
+│  └─ <animal>_nwb_batch_performance.json
+└─ run_nogui()
+   ├─ load -> extract_performance() -> analyze_session_responses()
+   ├─ results-table CSV and summary JSON
+   └─ --show-plots -> plot_session_visualizations() -> PNGs via Agg
 ```
 
-Relevant arguments: `--folder`, `--file`, `--outdir`, `--hit-source {IR,Licks}`, `--animal`, `--folder-root`, and `--nwb-root`. In single-session terminal mode, a valid NWB file takes precedence over a valid folder. If both batch flags are supplied, folder-batch dispatch takes precedence.
+Arguments include `--folder`, `--file`, `--outdir`, `--hit-source {IR,Licks}`, `--animal`, `--folder-root`, `--nwb-root`. A valid NWB takes precedence over a valid folder in single-session terminal mode; folder batch wins if both batch flags are set. These are the existing general runners, not DMTS Animal or Lever CLI equivalents.
 
-`_process_batch_session()` uses cached DMTS hit-by-sound after performance extraction for DMTS; otherwise it selects IR or lick trial analysis using the chosen hit-by-sound function. `save_batch_dict()`, `load_batch_dict()`, and `load_batch_dicts()` provide separate programmatic pickle helpers; they do not by themselves produce the GUI Groups export schema.
+`_process_batch_session()` uses cached DMTS hit-by-sound after performance extraction, otherwise IR/lick trial analysis. `save_batch_dict()`, `load_batch_dict()` and `load_batch_dicts()` are separate programmatic pickle helpers; they do not construct GUI export schemas automatically.
 
-## Offline Learning and Threshold Helpers
+## Offline Learning Helpers
 
-These helpers in `behavior_plots.py` are separate from the live GUI batch and Groups curves described above.
+These functions remain separate from live Go/NoGo and DMTS batch curves:
 
-```text
-plot_batch_go_performance_by_window()
-└─ bins alldataGO per animal/session and returns performance curves
+- `plot_batch_go_performance_by_window()`: bins alldataGO per animal/session.
+- `plot_batch_go_mean_curve()`: `batch_go_performance_matrix()`, variability, optional sigmoid/threshold estimate.
+- `plot_batch_go_performance_with_threshold_subplot()` and `plot_batch_go_performance_with_threshold_protocol_columns()`: windowed learning/threshold views.
+- `plot_trials_to_threshold_summary()`, `plot_trials_to_threshold_boxplot_summary()`, `compare_trials_to_threshold_groups()`: threshold summaries/comparisons.
+- `plot_mean_go_by_sound()`, `fit_sigmoid_to_group_go()`, `plot_mean_go_by_sound_with_sigmoid()`: sound-level curves/fits.
 
-plot_batch_go_mean_curve()
-├─ batch_go_performance_matrix()
-├─ plots mean with variability/error bars
-└─ optional sigmoid fit / trials-to-threshold estimate
+## Maintenance
 
-plot_batch_go_performance_with_threshold_subplot()
-├─ per-animal windowed curves
-├─ sigmoid or first-bin threshold estimate
-└─ trials-to-threshold summary bars
-```
-
-Additional offline entry points include `plot_batch_go_performance_with_threshold_protocol_columns()`, `plot_trials_to_threshold_summary()`, `plot_trials_to_threshold_boxplot_summary()`, and `compare_trials_to_threshold_groups()` (with permutation-test support). Sound-level helpers include `plot_mean_go_by_sound()`, `fit_sigmoid_to_group_go()`, and `plot_mean_go_by_sound_with_sigmoid()`.
-
-## Maintenance Check
-
-When v9 changes, review this map against GUI callbacks, `analyze_session_responses()`, `extract_performance()`, plot signatures, and export schemas. Update the verification date only after checking the source. Changes to the Groups input contract, DMTS dispatch, rolling-window semantics, or terminal export formats should be reflected explicitly.
-
+Review module ownership, canvas action IDs, loader capabilities, scoring sources, ordering/window semantics and export versions when updating this map. Keep Go/NoGo animal averages distinct from DMTS equal-file averages, and saved outcomes distinct from signal-derived scores. Update the verification date after checking the source.

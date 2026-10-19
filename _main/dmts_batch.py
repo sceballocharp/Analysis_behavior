@@ -106,6 +106,35 @@ def summarize_session(session, path, silent_match_threshold=5):
                 blank_response=blank_summary(trials))
 
 
+def plot_session_outcome_counts(results):
+    """Absolute saved HIT/CR counts in chronological session order."""
+    if not results:
+        raise ValueError("Run batch performance first.")
+    sessions = sorted(results, key=session_sort_key)
+    hits = [sum(t["kind"] != "blank" and t["outcome"] == "Hit" for t in s["trials"]) for s in sessions]
+    crs = [sum(t["kind"] != "blank" and t["outcome"] == "Correct" for t in s["trials"]) for s in sessions]
+    fig = Figure(figsize=(max(11, len(sessions) * .65), 6))
+    ax = fig.subplots()
+    x = np.arange(1, len(sessions) + 1)
+    for values, offset, label, color in ((hits, -.2, "HIT", "#339966"),
+                                          (crs, .2, "CR", "#2878B5")):
+        bars = ax.bar(x + offset, values, width=.38, label=label, color=color)
+        ax.bar_label(bars, padding=3, fontsize=9)
+    labels = [f"{index}\n{s.get('session_start_time') or 'Unknown time'}" for index, s in enumerate(sessions, 1)]
+    ax.set_xticks(x, labels, rotation=45, ha="right")
+    ax.set(xlabel="Session (chronological; unknown times last)", ylabel="Number of trials",
+           title="DMTS HIT and correct rejection counts per session")
+    ax.set_ylim(0, max(1, max(hits + crs)) * 1.15)
+    from matplotlib.ticker import MaxNLocator
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.grid(axis="y", alpha=.2)
+    ax.set_axisbelow(True)
+    ax.legend()
+    fig.text(.5, .02, "Source: saved trial outcomes. Absolute counts; blank trials excluded.", ha="center", fontsize=9)
+    fig.tight_layout(rect=(0, .05, 1, 1))
+    return fig
+
+
 def session_hit_rates_by_stim(results):
     """Match hit rates per session; session means must not pool trial counts."""
     grouped = {}

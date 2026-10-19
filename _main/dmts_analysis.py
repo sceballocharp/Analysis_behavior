@@ -160,7 +160,7 @@ def plot_dmts_trial(session, trial_index=0, show=True, block=False):
             ax.text(.5, .5, side + ' lick channel not recorded', transform=ax.transAxes, ha='center')
         else:
             times = signal_times(signal)
-            mask = (times >= start - .5) & (times <= trial['response_end'] + .5)
+            mask = (times >= start - .5) & (times <= trial['response_end'] + 1)
             ax.plot(times[mask] - start, np.asarray(signal['data'])[mask], color=color, lw=.9)
             ax.axhline(analysis['thresholds'][side], color=color, ls='--', lw=.8)
             for event in trial['events'][side]:
@@ -170,7 +170,7 @@ def plot_dmts_trial(session, trial_index=0, show=True, block=False):
         signal = session['signals'].get(name)
         if signal is not None:
             times = signal_times(signal)
-            mask = (times >= start - .5) & (times <= trial['response_end'] + .5)
+            mask = (times >= start - .5) & (times <= trial['response_end'] + 1)
             if name == 'WhichSound':
                 ax.step(times[mask] - start, np.asarray(signal['data'])[mask],
                         where='post', color='#2F6F9F', lw=1.2)
@@ -191,7 +191,7 @@ def plot_dmts_trial(session, trial_index=0, show=True, block=False):
                        color='#B392C7', alpha=.2, label='Test')
         ax.axvspan(trial['response_start'] - start, trial['response_end'] - start,
                    color='#73B87A', alpha=.17, label='Response window')
-        ax.set_xlim(-.5, trial['response_end'] - start + .5)
+        ax.set_xlim(-.5, trial['response_end'] - start + 1)
         ax.grid(alpha=.18)
     axes[0].legend(loc='upper right', fontsize=8)
     left = len(trial['events']['Left']) if 'Left' in trial['events'] else 'missing'

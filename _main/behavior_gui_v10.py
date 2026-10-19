@@ -3,6 +3,7 @@
 from pathlib import Path
 from collections import Counter
 import threading
+import math
 import ast
 import io
 import traceback
@@ -132,6 +133,9 @@ class ScanMediaFoldersApp:
             preferences = {}
             show_guide = True
         self.preferences = preferences
+        from gui_fonts import GuiFonts
+        self.fonts = GuiFonts(preferences)
+        self.fonts.apply(self.root)
         default_nwb_folder = preferences.get("default_nwb_folder", ".")
         self.default_nwb_folder = default_nwb_folder if isinstance(default_nwb_folder, str) and default_nwb_folder.strip() else "."
         self.show_guide_at_startup = tk.BooleanVar(value=show_guide)
@@ -167,16 +171,16 @@ class ScanMediaFoldersApp:
         window.minsize(480, 360)
         frame = ttk.Frame(window, padding=20)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Your first session", font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        ttk.Label(frame, text="Your first session", font=self.fonts.tk("guide_title")).pack(anchor="w")
         ttk.Label(frame, text="Follow these steps, then keep this guide open while you work.").pack(
             anchor="w", pady=(4, 12)
         )
         body = scrolledtext.ScrolledText(
-            frame, wrap="word", font=("Segoe UI", 11), padx=12, pady=12,
+            frame, wrap="word", font=self.fonts.tk("guide_body"), padx=12, pady=12,
             relief="flat", borderwidth=0, width=60, height=18,
         )
         body.pack(fill="both", expand=True)
-        body.tag_configure("heading", font=("Segoe UI", 12, "bold"), foreground="#245783",
+        body.tag_configure("heading", font=self.fonts.tk("guide_heading"), foreground="#245783",
                            spacing1=12, spacing3=5)
         body.tag_configure("paragraph", spacing3=10)
         sections = [
@@ -244,7 +248,7 @@ class ScanMediaFoldersApp:
         title_label = ttk.Label(
             main_frame,
             text="Behavior data analysis",
-            font=("Segoe UI", 14, "bold"),
+            font=self.fonts.tk("main_title"),
         )
         title_label.pack(anchor="w")
 
@@ -257,12 +261,6 @@ class ScanMediaFoldersApp:
         )
         description_label.pack(anchor="w", pady=(4, 14))
 
-        style = ttk.Style(self.root)
-        style.configure(
-            "Main.TNotebook.Tab",
-            font=("Segoe UI", 12, "bold"),
-            padding=(16, 8),
-        )
         self.main_notebook = ttk.Notebook(main_frame, style="Main.TNotebook")
         self.main_notebook.pack(fill="both", expand=True, pady=(0, 8))
         self.main_tab = ttk.Frame(self.main_notebook)
@@ -449,7 +447,7 @@ class ScanMediaFoldersApp:
         ttk.Label(controls_frame, text="Output").pack(anchor="w")
         self.output_text = scrolledtext.ScrolledText(
             controls_frame, wrap="word", width=32, height=6,
-            font=("Consolas", 10),
+            font=self.fonts.tk("output"),
         )
         self.output_text.pack(fill="both", expand=True, pady=(4, 0))
         self.output_text.configure(state="disabled")
@@ -472,6 +470,7 @@ class ScanMediaFoldersApp:
             "pick_event",
             self._handle_main_canvas_pick,
         )
+        self._draw_canvas_connections()
         self.main_canvas.draw()
         self.main_canvas.get_tk_widget().pack(fill="both", expand=True)
 
@@ -589,6 +588,7 @@ class ScanMediaFoldersApp:
         self.main_canvas_ax.set_yticks([])
         for spine in self.main_canvas_ax.spines.values():
             spine.set_visible(False)
+        self._draw_canvas_connections()
         self.main_canvas.draw()
 
     def _browse_folder(self) -> None:
@@ -1288,8 +1288,37 @@ class ScanMediaFoldersApp:
         except (ValueError, KeyError, TypeError) as exc:
             messagebox.showerror("Group plot unavailable", str(exc), parent=self.root)
 
-    def _canvas_button(self, x, y, label, action, facecolor, edgecolor, enabled=True, ax=None):
-        """Draw a 150 x 50 display-pixel button, anchored to the axes' top left."""
+    def _draw_canvas_connections(self, ax=None):
+        """Connect visible rectangles using the preference-defined action IDs."""
+        from canvas_connections import draw_connections
+        ax = self.main_canvas_ax if ax is None else ax
+        if ax is not None:
+            draw_connections(ax, self.preferences)
+
+    def _canvas_button(self, x, y, label, action, facecolor, edgecolor, enabled=True, ax=None, grid=True):
+        """Draw a 150 x 50 pixel button with preference-defined margins and gaps.
+
+        Existing callers use the original 16-margin, 166/66-pitch grid. Convert
+        those logical positions here so every panel shares the same spacing.
+        Floating buttons can opt out of grid conversion with grid=False.
+        """
+        layout = self.preferences.get("canvas_layout", {})
+        if not isinstance(layout, dict):
+            layout = {}
+
+        def spacing(key, default):
+            value = layout.get(key, default)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+                return value
+            return default
+
+        margin = spacing("starting_margin_px", 15)
+        if grid:
+            x = margin + (x - 16) / 166 * (150 + spacing("horizontal_gap_px", 25))
+            y = margin + (y - 16) / 66 * (50 + spacing("vertical_gap_px", 25))
+        else:
+            x = margin + x - 16
+            y = max(margin, min(y, ax.bbox.height - 50 - margin)) if ax is not None else max(margin, y)
         ax = self.main_canvas_ax if ax is None else ax
         transform = Affine2D().scale(1, -1) + ScaledTranslation(0, 1, ax.transAxes)
         button = Rectangle((x, y), 150, 50, transform=transform,
@@ -1298,7 +1327,7 @@ class ScanMediaFoldersApp:
         button.set_gid(action)
         ax.add_patch(button)
         ax.text(x + 75, y + 25, label, transform=transform,
-                ha="center", va="center", fontsize=8, fontweight="bold",
+                ha="center", va="center", **self.fonts.mpl("canvas_buttons"),
                 color="#222222")
         return button
 
@@ -1322,16 +1351,19 @@ class ScanMediaFoldersApp:
                              bbox=[0.10, 0.90 - min(0.40, 0.065 * (len(rows) + 1)),
                                    0.80, min(0.40, 0.065 * (len(rows) + 1))], cellLoc="center")
             table.auto_set_font_size(False)
-            table.set_fontsize(9)
+            for cell in table.get_celld().values():
+                cell.get_text().set(**self.fonts.mpl("canvas_table"))
             ax.set_title("Group assignments", loc="left")
             if self.group_assignments:
                 self._canvas_button(16, min(300, max(16, ax.bbox.height - 60)), "Plot group\naverages", "plot_group_averages",
-                                    "#F3FAF1", "#59A14F")
+                                    "#F3FAF1", "#59A14F", ax=ax, grid=False)
+            self._draw_canvas_connections()
             self.main_canvas.draw()
             return
         else:
             text = "Select a folder containing batch PKL exports."
-        ax.text(0.5, 0.5, text, ha="center", va="center", fontsize=13, transform=ax.transAxes, wrap=True)
+        ax.text(0.5, 0.5, text, ha="center", va="center", **self.fonts.mpl("canvas_message"), transform=ax.transAxes, wrap=True)
+        self._draw_canvas_connections()
         self.main_canvas.draw()
 
     def _draw_animal_canvas(self) -> None:
@@ -1342,14 +1374,15 @@ class ScanMediaFoldersApp:
         ax.axis("off")
         if self.nwb_loading:
             ax.text(0.5, 0.5, "Loading ...", ha="center", va="center",
-                    fontsize=16, fontweight="bold", transform=ax.transAxes)
+                    **self.fonts.mpl("canvas_loading"), transform=ax.transAxes)
+            self._draw_canvas_connections()
             self.main_canvas.draw()
             return
         files = self.found_nwb_files
         folders = self.found_session_folders
         if not files and not folders:
             ax.text(0.06, 0.88, "Select an animal from Detected animal to begin." if self.nwb_groups else "Find sessions and select an animal to begin.",
-                    transform=ax.transAxes, fontsize=11, wrap=True)
+                    transform=ax.transAxes, **self.fonts.mpl("canvas_hint"), wrap=True)
         else:
             label = "Run All NWB Files" if files else "Run All Folders"
             action = "run_all_nwb" if files else "run_all_folders"
@@ -1360,6 +1393,7 @@ class ScanMediaFoldersApp:
                                     "#F3FAF1", "#59A14F")
                 self._canvas_button(16, 82, "Export batch\ndata (.pkl)", "export_batch_data",
                                     "#F3FAF1", "#59A14F")
+        self._draw_canvas_connections()
         self.main_canvas.draw()
 
     def _draw_selected_input_box(self) -> None:
@@ -1376,6 +1410,7 @@ class ScanMediaFoldersApp:
         if not self._single_input_selected or (not self.file_var.get().strip() and not self.folder_var.get().strip()):
             self.main_canvas_ax.clear()
             self.main_canvas_ax.axis("off")
+            self._draw_canvas_connections()
             self.main_canvas.draw()
             return
 
@@ -1416,6 +1451,7 @@ class ScanMediaFoldersApp:
             self._canvas_button(182, 16, "IR occupancy", "plot_ir_occupancy_by_sound", "#F3FAF1", "#59A14F")
             self._canvas_button(182, 82, "Performance", "plot_performance", "#F3FAF1", "#59A14F")
             self._canvas_button(182, 148, "Hit by sound", "plot_hit_by_sound", "#F3FAF1", "#59A14F")
+        self._draw_canvas_connections()
         self.main_canvas.draw()
 
     def _handle_main_canvas_pick(self, event) -> None:
@@ -1461,9 +1497,9 @@ class ScanMediaFoldersApp:
         window.protocol("WM_DELETE_WINDOW", self._close_session_console)
         frame = ttk.Frame(window, padding=14)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Inspect the loaded session", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        ttk.Label(frame, text="Inspect the loaded session", font=self.fonts.tk("console_title")).pack(anchor="w")
         ttk.Label(frame, text="Write Python below, then click Execute. Results appear in Output.").pack(anchor="w", pady=(4, 8))
-        self.console_input = scrolledtext.ScrolledText(frame, wrap="none", font=("Consolas", 11), height=8)
+        self.console_input = scrolledtext.ScrolledText(frame, wrap="none", font=self.fonts.tk("console_input"), height=8)
         self.console_input.pack(fill="both", expand=True)
         self.console_input.insert("1.0", "print(single_session_datadict.keys())")
         ttk.Label(frame, text="Commands run as Python and can modify session data and files.").pack(anchor="w", pady=(8, 4))

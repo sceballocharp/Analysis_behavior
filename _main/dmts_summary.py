@@ -4,10 +4,8 @@ import pandas as pd
 from matplotlib.figure import Figure
 
 
-def plot_performance_by_sound(session, title="DMTS session"):
-    """Separate match hit rates from non-match sound-pair rejection rates."""
-    from matplotlib import colormaps
-
+def performance_by_stim_data(session):
+    """Shared saved-outcome data for the StimID figure and spatial heatmap."""
     table = session["ResultsTable"]
     if not {"SavedOutcome", "SampleSoundId", "TestSoundId"}.issubset(table.columns) or table.empty:
         raise ValueError("This plot requires saved outcomes and sample/test IDs for DMTS trials.")
@@ -27,6 +25,13 @@ def plot_performance_by_sound(session, title="DMTS session"):
             values.append(int(outcome == ("HIT" if sample == test else "CR")))
     if not pairs:
         raise ValueError("No non-blank DMTS sounds found in this session.")
+    return pairs
+
+
+def plot_performance_by_sound(session, title="DMTS session"):
+    """Separate match hit rates from non-match sound-pair rejection rates."""
+    from matplotlib import colormaps
+    pairs = performance_by_stim_data(session)
     sounds = sorted({sid for pair in pairs for sid in pair})
     size = len(sounds)
     fig = Figure(figsize=(max(12, 6 + size * .55), max(6, 2.5 + size * .55)))
@@ -74,6 +79,44 @@ def plot_performance_by_sound(session, title="DMTS session"):
              "Heatmap: diagonal = match trials; empty grey cells = untested pairs; N/A = no eligible outcomes.",
              ha="center", fontsize=9)
     fig.tight_layout(rect=(0, .09, 1, .95))
+    return fig
+
+
+def plot_performance_position_heatmap(pairs, trials, title="Performance by position", cmap='viridis'):
+    from dmts_voltage_viewer import plot_voltage_position_heatmap
+    patterns = {}
+    for trial in trials:
+        for phase in ('sample', 'test'):
+            presentation = trial.get(phase)
+            if not presentation:
+                continue
+            name = presentation['stimulus'].strip()
+            # CSV library STIM1 corresponds to NWB light ID 1.
+            import re
+            match = re.fullmatch(r'(?:STIM\s*)?(\d+)', name, re.IGNORECASE)
+            if not match or not presentation['pattern']:
+                continue
+            sid = int(match.group(1))
+            pattern = frozenset(presentation['pattern'])
+            if sid in patterns and patterns[sid] != pattern:
+                raise ValueError(f'StimID {sid} has inconsistent LED patterns in the CSV.')
+            patterns[sid] = pattern
+    means = {}
+    for (sample, test), values in pairs.items():
+        if sample == test and sample > 0 and values and sample in patterns:
+            rate = float(100 * np.mean(values))
+            means[str(sample)] = {position: rate for position in patterns[sample]}
+    if not means:
+        raise ValueError('No match-trial performance could be mapped to CSV LED patterns (STIM1, STIM2, …).')
+    fig = plot_voltage_position_heatmap(means, title=title, cmin=0, cmax=100, cmap=cmap)
+    fig.axes[0].set_title('Match-trial hit rate by LED position')
+    for text in fig.axes[0].texts:
+        text.set_text(f'{float(text.get_text()):.1f}%')
+    for ax in fig.axes:
+        if ax.get_ylabel() == 'Mean voltage (V)':
+            ax.set_ylabel('Match hit rate (%)')
+    fig.texts[-1].set_text('Saved outcomes; match trials only. Each cell: mean of overlapping StimID hit rates (%).\n'
+                          'Gray: no mapped eligible match trials. P increases right; N increases up.')
     return fig
 
 

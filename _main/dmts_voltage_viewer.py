@@ -150,6 +150,96 @@ def plot_voltage_stim_summary(groups, stimuli, title="CSV voltage summary"):
     return fig
 
 
+def plot_voltage_stim_heatmaps(groups, stimuli, title="Average voltages by StimID",
+                               cmin=None, cmax=None, cmap='viridis'):
+    """Plot the summary's per-position means on logical 10x10 grids."""
+    if not stimuli:
+        raise ValueError("No stimuli found in the CSV log.")
+    columns = min(4, int(np.ceil(np.sqrt(len(stimuli)))))
+    rows = (len(stimuli) + columns - 1) // columns
+    fig = Figure(figsize=(max(8, columns * 4), max(5, rows * 4 + 1)))
+    axes = fig.subplots(rows, columns, squeeze=False).ravel()
+    grids = []
+    for stim in stimuli:
+        grid = np.full((10, 10), np.nan)
+        for position, values in groups[stim]['positions'].items():
+            values = np.asarray(values, dtype=float)
+            values = values[np.isfinite(values)]
+            if len(values):
+                grid[parse_position(position)] = values.mean()
+        grids.append(grid)
+    finite = np.concatenate([g[np.isfinite(g)] for g in grids])
+    low = min(0., finite.min()) if len(finite) else 0.
+    high = max(9., finite.max()) if len(finite) else 9.
+    low = low if cmin is None else float(cmin)
+    high = high if cmax is None else float(cmax)
+    if not np.isfinite([low, high]).all() or low >= high:
+        raise ValueError('Color limits must be finite, with cmin less than cmax.')
+    cmap = plt.colormaps[cmap].with_extremes(bad='lightgray')
+    for ax, stim, grid in zip(axes, stimuli, grids):
+        image = ax.imshow(np.ma.masked_invalid(grid), origin='lower', cmap=cmap,
+                          vmin=low, vmax=high, interpolation='nearest')
+        group = groups[stim]
+        ax.set_title(f"{stim} | {group['valid']}/{group['total']} valid presentations", fontsize=10)
+        ax.set_xticks(range(10), [f'P{i}' for i in range(1, 11)], rotation=90, fontsize=7)
+        ax.set_yticks(range(10), [f'N{i}' for i in range(1, 11)], fontsize=7)
+        ax.set(xlabel='P channel', ylabel='N channel')
+        ax.set_xticks(np.arange(-.5, 10, 1), minor=True)
+        ax.set_yticks(np.arange(-.5, 10, 1), minor=True)
+        ax.grid(which='minor', color='white', linewidth=.5)
+        ax.tick_params(which='minor', length=0)
+        for row, col in np.argwhere(np.isfinite(grid)):
+            value = grid[row, col]
+            ax.text(col, row, f'{value:.2f}', ha='center', va='center', fontsize=6,
+                    color='white' if (value - low) / (high - low) < .5 else 'black')
+        if not np.isfinite(grid).any():
+            ax.text(.5, .5, 'No valid voltage measurements', transform=ax.transAxes,
+                    ha='center', fontsize=9)
+        fig.colorbar(image, ax=ax, fraction=.04, pad=.03, label='Mean voltage (V)')
+    for ax in axes[len(stimuli):]:
+        ax.set_visible(False)
+    fig.suptitle(title, fontsize=12)
+    fig.text(.5, .015, 'Sample + test presentations pooled by StimID. Numbers: mean voltage (V). Gray: no measurements.\n'
+             'P increases right; N increases up. Active positions on the same P channel share its measurement.',
+             ha='center', fontsize=9)
+    fig.tight_layout(rect=(0, .07, 1, .94))
+    return fig
+
+
+def voltage_position_averages(groups):
+    """Cache one finite presentation mean per StimID and active LED position."""
+    means = {}
+    for stim, group in groups.items():
+        positions = {}
+        for position, values in group['positions'].items():
+            values = np.asarray(values, dtype=float)
+            values = values[np.isfinite(values)]
+            if len(values):
+                positions[position] = float(values.mean())
+        means[stim] = positions
+    return means
+
+
+def plot_voltage_position_heatmap(means, title="Average voltage by position",
+                                  cmin=None, cmax=None, cmap='viridis'):
+    positions = {}
+    for values in means.values():
+        for position, value in values.items():
+            if np.isfinite(value):
+                positions.setdefault(position, []).append(value)
+    if not positions:
+        raise ValueError('No valid position averages are available.')
+    group = dict(positions=positions, valid=len(positions), total=len(positions))
+    fig = plot_voltage_stim_heatmaps({'All positions': group}, ['All positions'], title,
+                                     cmin=cmin, cmax=cmax, cmap=cmap)
+    fig.axes[0].set_title('All measured positions')
+    fig.set_size_inches(9, 8)
+    fig.texts[-1].set_text('Each cell: mean of per-StimID voltage averages at that position (equal weight per StimID).\n'
+                          'Gray: no measurements. P increases right; N increases up. Measurements are per P channel.')
+    fig.tight_layout(rect=(0, .07, 1, .94))
+    return fig
+
+
 class DMTSVoltageViewer:
     def __init__(self, root, default_file=None, on_loaded=None):
         self.root = root

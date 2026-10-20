@@ -214,6 +214,23 @@ class DmtsPanel:
             ttk.Entry(match_settings, textvariable=self.matchonly_vars[key], width=10).grid(
                 row=row, column=1, sticky="ew", padx=(8, 0), pady=2)
         match_settings.columnconfigure(1, weight=1)
+        heatmap_settings = ttk.LabelFrame(dmts_plot_settings, text="Voltage heatmap settings", padding=10)
+        heatmap_settings.pack(fill="x", pady=(12, 0))
+        self.voltage_heatmap_vars = {}
+        for row, (key, label, default) in enumerate((
+                ('cmin', 'cmin (V; blank = auto)', ''),
+                ('cmax', 'cmax (V; blank = auto)', ''),
+                ('cmap', 'Colormap', 'viridis'))):
+            var = tk.StringVar(value=default)
+            self.voltage_heatmap_vars[key] = var
+            ttk.Label(heatmap_settings, text=label).grid(row=row, column=0, sticky='w', pady=3)
+            if key == 'cmap':
+                widget = ttk.Combobox(heatmap_settings, textvariable=var, state='readonly',
+                                      values=sorted(plt.colormaps()), width=15)
+            else:
+                widget = ttk.Entry(heatmap_settings, textvariable=var, width=10)
+            widget.grid(row=row, column=1, sticky='ew', padx=(8, 0), pady=3)
+        heatmap_settings.columnconfigure(1, weight=1)
 
 
     def _build_dmts_canvas(self, dmts_panels, dmts_plot) -> None:
@@ -348,6 +365,12 @@ class DmtsPanel:
             if csv_ready:
                 self.app._canvas_button(182, 346, "Average voltages\nby StimID", "dmts_csv_average",
                                     "#F3FAF1", "#59A14F", ax=ax)
+            if getattr(self, '_dmts_voltage_averages', None):
+                self.app._canvas_button(348, 346, "Voltage heatmap\n10 × 10", "dmts_csv_heatmap",
+                                        "#F3FAF1", "#59A14F", ax=ax)
+            if csv_ready and getattr(self, '_dmts_performance_pairs', None):
+                self.app._canvas_button(514, 346, "Performance heatmap\n10 × 10", "dmts_performance_heatmap",
+                                        "#F3FAF1", "#59A14F", ax=ax)
         self.app._draw_canvas_connections(self.canvas_ax)
         self.canvas.draw_idle()
 
@@ -507,6 +530,12 @@ class DmtsPanel:
 
 
     def _handle_dmts_canvas_pick(self, event) -> None:
+        if event.artist.get_gid() == "dmts_performance_heatmap":
+            self._open_dmts_performance_heatmap()
+            return
+        if event.artist.get_gid() == "dmts_csv_heatmap":
+            self._open_dmts_csv_heatmap()
+            return
         if event.artist.get_gid() == "dmts_csv_load":
             self._load_dmts_csv()
             return
@@ -572,13 +601,28 @@ class DmtsPanel:
 
     def _open_dmts_sound_performance(self) -> None:
         try:
-            from dmts_summary import plot_performance_by_sound
+            from dmts_summary import plot_performance_by_sound, performance_by_stim_data
             name = Path(self.dmts_file_var.get()).name
             figure = plot_performance_by_sound(self._dmts_session, title=name)
+            self._dmts_performance_pairs = performance_by_stim_data(self._dmts_session)
         except Exception as exc:
             messagebox.showerror("Performance by StimID unavailable", str(exc), parent=self.root)
             return
         self._show_dmts_figure(figure, f"Performance by StimID - {name}", "1400x850")
+        self._draw_dmts_canvas()
+
+    def _open_dmts_performance_heatmap(self):
+        if not (getattr(self, '_dmts_performance_pairs', None) and getattr(self, '_dmts_csv_trials', None)):
+            return
+        try:
+            from dmts_summary import plot_performance_position_heatmap
+            figure = plot_performance_position_heatmap(self._dmts_performance_pairs,
+                        self._dmts_csv_trials, title=f'{Path(self.dmts_file_var.get()).name} | Performance by position',
+                        cmap=self.voltage_heatmap_vars['cmap'].get())
+        except ValueError as exc:
+            messagebox.showerror('Performance heatmap unavailable', str(exc), parent=self.root)
+            return
+        self._show_dmts_figure(figure, 'Performance heatmap — all positions', '950x850')
 
 
     def _open_dmts_summary(self) -> None:
@@ -967,6 +1011,8 @@ class DmtsPanel:
 
 
     def _update_dmts_voltage_button(self):
+        self._dmts_performance_pairs = {}
+        self._dmts_voltage_averages = {}
         self._dmts_csv_trials = []
         self._dmts_csv_path = None
         existing = getattr(self, "dmts_voltage_window", None)
@@ -977,6 +1023,7 @@ class DmtsPanel:
 
 
     def _dmts_csv_loaded(self, path, trials):
+        self._dmts_voltage_averages = {}
         self._dmts_csv_path = path
         self._dmts_csv_trials = trials
         self._write_dmts_file_output(f"Loaded CSV file: {path}")
@@ -987,11 +1034,30 @@ class DmtsPanel:
         if not getattr(self, "_dmts_csv_trials", None):
             return
         from types import SimpleNamespace
-        from dmts_voltage_viewer import DMTSVoltageViewer
+        from dmts_voltage_viewer import DMTSVoltageViewer, voltage_presentations_by_stim, voltage_position_averages
+        self._dmts_voltage_averages = voltage_position_averages(
+            voltage_presentations_by_stim(self._dmts_csv_trials))
         state = SimpleNamespace(trials=self._dmts_csv_trials, window=self.root,
                                 file_path=tk.StringVar(master=self.root, value=str(self._dmts_csv_path)),
                                 summary_closers=[])
         DMTSVoltageViewer.open_stim_summary(state)
+        self._draw_dmts_canvas()
+
+    def _open_dmts_csv_heatmap(self):
+        if not getattr(self, '_dmts_voltage_averages', None):
+            return
+        from dmts_voltage_viewer import plot_voltage_position_heatmap
+        try:
+            settings = {key: value.get().strip() for key, value in self.voltage_heatmap_vars.items()}
+            figure = plot_voltage_position_heatmap(self._dmts_voltage_averages,
+                        title=f'{Path(self._dmts_csv_path).name} | Average voltage by position',
+                        cmin=float(settings['cmin']) if settings['cmin'] else None,
+                        cmax=float(settings['cmax']) if settings['cmax'] else None,
+                        cmap=settings['cmap'])
+        except ValueError as exc:
+            messagebox.showerror('Voltage heatmap unavailable', str(exc), parent=self.root)
+            return
+        self._show_dmts_figure(figure, 'Average voltage heatmap — all positions', '950x850')
 
 
     def _dmts_voltage_logs(self):

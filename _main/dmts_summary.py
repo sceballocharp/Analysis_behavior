@@ -4,6 +4,58 @@ import pandas as pd
 from matplotlib.figure import Figure
 
 
+def plot_modality_performance(session, title="DMTS session"):
+    """Compare saved-outcome accuracy by recorded trial modality."""
+    table = session['ResultsTable']
+    required = {'StimulusSource', 'SampleSoundId', 'TestSoundId', 'SavedOutcome'}
+    if not required.issubset(table.columns):
+        raise ValueError('Reload the NWB file to read per-trial light/sound identities.')
+    aliases = {'hit': 'HIT', 'miss': 'MISS', 'correct': 'CR', 'correctrejection': 'CR',
+               'cr': 'CR', 'falsealarm': 'FA', 'fa': 'FA'}
+    records = []
+    for _, row in table.iterrows():
+        if row.SampleSoundId == row.TestSoundId == 0:
+            continue
+        source = str(row.StimulusSource).strip().lower()
+        if source not in ('led', 'sound'):
+            continue
+        raw = row.SavedOutcome
+        raw = raw.decode('utf-8') if isinstance(raw, bytes) else str(raw)
+        outcome = aliases.get(raw.strip().lower().replace(' ', '').replace('_', ''))
+        records.append((source, row.SampleSoundId == row.TestSoundId, outcome))
+    if not records:
+        raise ValueError('No light or sound trials with known modality were found.')
+    fig = Figure(figsize=(10, 6))
+    ax = fig.subplots()
+    stats = {}
+    for i, (source, label, color) in enumerate((('led', 'Light', '#59A14F'), ('sound', 'Sound', '#4C78A8'))):
+        values = [r for r in records if r[0] == source]
+        stats[label] = {}
+        for j, metric in enumerate(('Overall accuracy', 'Match hit rate', 'Non-match CR rate')):
+            eligible = [r for r in values if r[2] is not None and (j == 0 or r[1] == (j == 1))]
+            correct = sum(r[2] == ('HIT' if r[1] else 'CR') for r in eligible)
+            count = len(eligible)
+            rate = 100 * correct / count if count else np.nan
+            stats[label][metric] = dict(correct=correct, n=count, percent=rate)
+            x = j + (i - .5) * .34
+            ax.bar(x, rate if count else 0, width=.32, color=color, label=label if j == 0 else None)
+            ax.text(x, (rate if count else 0) + 2, f'{rate:.1f}%\n{correct}/{count}' if count else 'N/A\nn=0',
+                    ha='center', va='bottom', fontsize=9)
+    ax.set(xticks=range(3), xticklabels=['Overall accuracy', 'Match hit rate', 'Non-match CR rate'],
+           ylabel='Performance (%)', ylim=(0, 117), title='Light vs Sound')
+    ax.set_yticks(range(0, 101, 20))
+    ax.legend()
+    ax.grid(axis='y', alpha=.2)
+    ax.set_axisbelow(True)
+    fig.suptitle(title, fontsize=11)
+    excluded = sum(r[2] is None for r in records)
+    fig.text(.5, .025, f'Saved outcomes; blanks and {excluded} unknown outcome(s) excluded. Labels: correct / eligible trials.\n'
+             'Overall: HIT on match trials and CR on non-match trials.', ha='center', fontsize=9)
+    fig.tight_layout(rect=(0, .09, 1, .94))
+    fig.modality_stats = stats
+    return fig
+
+
 def performance_by_stim_data(session):
     """Shared saved-outcome data for the StimID figure and spatial heatmap."""
     table = session["ResultsTable"]
@@ -110,6 +162,7 @@ def plot_performance_position_heatmap(pairs, trials, title="Performance by posit
         raise ValueError('No match-trial performance could be mapped to CSV LED patterns (STIM1, STIM2, …).')
     fig = plot_voltage_position_heatmap(means, title=title, cmin=0, cmax=100, cmap=cmap)
     fig.axes[0].set_title('Match-trial hit rate by LED position')
+    fig.heatmap_kind = 'performance_percent'
     for text in fig.axes[0].texts:
         text.set_text(f'{float(text.get_text()):.1f}%')
     for ax in fig.axes:

@@ -1,6 +1,7 @@
 """DMTS controls, session viewers, and batch analysis for the behavior GUI."""
 from pathlib import Path
 import os
+import json
 import pickle
 import queue
 import re
@@ -125,6 +126,18 @@ class DmtsPanel:
 
     def _build_dmts_animal_controls(self, dmts_animal_tab) -> None:
         """Build mouse-folder selection, batch settings, and animal output."""
+        self.dmts_animal_notebook = ttk.Notebook(dmts_animal_tab, style="DmtsFile.TNotebook")
+        self.dmts_animal_notebook.pack(fill="both", expand=True)
+        main_page = ttk.Frame(self.dmts_animal_notebook)
+        self.dmts_light_matchonly_tab = ttk.Frame(self.dmts_animal_notebook)
+        self.dmts_animal_notebook.add(main_page, text="Main")
+        self.dmts_animal_notebook.add(self.dmts_light_matchonly_tab, text="LED testing")
+        self.dmts_ls_tab = ttk.Frame(self.dmts_animal_notebook)
+        self.dmts_animal_notebook.add(self.dmts_ls_tab, text="L&S")
+        self._build_ls_controls(self.dmts_ls_tab)
+        self.dmts_animal_notebook.bind("<<NotebookTabChanged>>", lambda _event: self._draw_dmts_canvas())
+        self._build_light_matchonly_controls(self.dmts_light_matchonly_tab)
+        dmts_animal_tab = main_page
         self.dmts_mouse_folder_var = tk.StringVar(value="No mouse folder selected")
         self.dmts_scan_status_var = tk.StringVar(value="Choose a mouse folder")
         self.dmts_silent_match_var = tk.StringVar(value="5")
@@ -147,6 +160,254 @@ class DmtsPanel:
         self.dmts_animal_output = scrolledtext.ScrolledText(
             dmts_animal_tab, wrap="word", width=32, height=12, font=self.app.fonts.tk("output"), state="disabled")
         self.dmts_animal_output.pack(fill="both", expand=True)
+
+
+    def _build_ls_controls(self, parent):
+        self.ls_folder = None
+        self.ls_results = []
+        self.ls_errors = {}
+        self._ls_busy = False
+        self._ls_generation = 0
+        self.ls_folder_var = tk.StringVar(value="No mouse folder selected")
+        self.ls_status_var = tk.StringVar(value="Select a mouse folder, then run batch analysis.")
+        ttk.Button(parent, text="Select mouse folder", command=self._browse_ls_folder).pack(anchor="w")
+        ttk.Label(parent, textvariable=self.ls_folder_var, wraplength=300).pack(anchor="w", pady=(6, 8))
+        ttk.Label(parent, textvariable=self.ls_status_var, wraplength=300).pack(anchor="w")
+        ttk.Label(parent, text="Includes NWB files in subfolders. Uses saved outcomes and recorded Light/Sound identities.", wraplength=300).pack(anchor="w", pady=(8, 8))
+        ttk.Label(parent, text="Output").pack(anchor="w")
+        self.ls_output = scrolledtext.ScrolledText(parent, wrap="word", width=32, height=12,
+                                                font=self.app.fonts.tk("output"), state="disabled")
+        self.ls_output.pack(fill="both", expand=True, pady=(4, 0))
+
+    def _write_ls_output(self, text):
+        self.ls_output.configure(state="normal")
+        self.ls_output.insert("end", text + "\n")
+        self.ls_output.see("end")
+        self.ls_output.configure(state="disabled")
+
+    def _browse_ls_folder(self):
+        folder = filedialog.askdirectory(parent=self.root, title="Select L&S mouse folder",
+                                         initialdir=str(self.ls_folder) if self.ls_folder else self.default_nwb_folder)
+        if folder:
+            self._ls_generation += 1
+            self._ls_busy = False
+            self.ls_folder = Path(folder)
+            self.ls_folder_var.set(folder)
+            self.ls_results = []
+            self.ls_errors = {}
+            self.ls_output.configure(state="normal")
+            self.ls_output.delete("1.0", "end")
+            self.ls_output.configure(state="disabled")
+            self.ls_status_var.set("Folder selected. Click Batch analysis in the canvas.")
+            self._draw_dmts_canvas()
+
+    def _run_ls_batch(self):
+        if self._ls_busy or self.ls_folder is None:
+            return
+        self._ls_generation += 1
+        generation = self._ls_generation
+        folder = self.ls_folder
+        self._ls_busy = True
+        self.ls_results = []
+        self.ls_errors = {}
+        self.ls_status_var.set("Searching for NWB files...")
+        self._write_ls_output(f"Batch: {folder}")
+        self._draw_dmts_canvas()
+        messages = queue.Queue()
+
+        def worker():
+            from dmts_ls_batch import summarize_modality_session
+            try:
+                paths = []
+                def scan_error(exc):
+                    messages.put(("error", str(exc.filename), str(exc)))
+                for directory, dirs, files in os.walk(folder, onerror=scan_error, followlinks=False):
+                    if generation != self._ls_generation:
+                        return
+                    dirs.sort(key=str.casefold)
+                    paths.extend(Path(directory)/name for name in sorted(files, key=str.casefold) if Path(name).suffix.lower() == ".nwb")
+                messages.put(("found", None, len(paths)))
+                for index, path in enumerate(paths, 1):
+                    if generation != self._ls_generation:
+                        return
+                    try:
+                        result = summarize_modality_session(load_session_data_fromFile(path), path)
+                        messages.put(("result", str(path), result))
+                    except Exception as exc:
+                        messages.put(("error", str(path), str(exc)))
+                    messages.put(("progress", None, (index, len(paths))))
+            except Exception as exc:
+                messages.put(("error", str(folder), str(exc)))
+            finally:
+                messages.put(("done", None, None))
+
+        def poll():
+            if generation != self._ls_generation:
+                return
+            finished = False
+            for _ in range(100):
+                try:
+                    kind, path, payload = messages.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "result":
+                    self.ls_results.append(payload)
+                    stats = payload["stats"]
+                    self._write_ls_output(f"OK: {Path(path).name}")
+                    for label in ("Light", "Sound"):
+                        metric = stats[label]["Overall accuracy"]
+                        self._write_ls_output(f"  {label}: {metric['percent']:.1f}% (n={metric['n']})")
+                    self._write_ls_output(f"  Excluded: {payload['excluded']}")
+                elif kind == "error":
+                    self.ls_errors[path] = payload
+                    self._write_ls_output(f"Skipped: {path}: {payload}")
+                elif kind == "found":
+                    self._write_ls_output(f"Found {payload} NWB files.")
+                elif kind == "progress":
+                    self.ls_status_var.set(f"Analyzing {payload[0]}/{payload[1]} files")
+                elif kind == "done":
+                    finished = True
+                    break
+            if finished:
+                from dmts_batch import session_sort_key
+                self.ls_results.sort(key=session_sort_key)
+                self._ls_busy = False
+                self.ls_status_var.set(f"Batch complete: {len(self.ls_results)} sessions; {len(self.ls_errors)} skipped.")
+                self._write_ls_output(self.ls_status_var.get())
+                self._draw_dmts_canvas()
+            else:
+                self.root.after(100, poll)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, poll)
+
+    def _plot_ls_results(self):
+        if self._ls_busy or not self.ls_results:
+            return
+        from dmts_ls_batch import plot_modality_sessions
+        self._show_dmts_figure(plot_modality_sessions(self.ls_results), "L&S — Light vs Sound across files", "1250x950")
+
+
+    def _build_light_matchonly_controls(self, parent):
+        """Collect unmodified JSON payloads for later LED testing analysis."""
+        self.light_matchonly_results = {}
+        self.light_matchonly_maps = {'performance': {}, 'voltage': {}}
+        self.light_matchonly_errors = {}
+        self.light_matchonly_folder = None
+        self._light_matchonly_generation = 0
+        self._light_matchonly_busy = False
+        self.light_matchonly_folder_var = tk.StringVar(value="No mouse folder selected")
+        self.light_matchonly_status_var = tk.StringVar(value="Choose a mouse folder containing JSON files.")
+        ttk.Button(parent, text="Select mouse folder", command=self._browse_light_matchonly_folder).pack(anchor="w")
+        ttk.Label(parent, textvariable=self.light_matchonly_folder_var, wraplength=300).pack(anchor="w", pady=(6, 8))
+        ttk.Label(parent, textvariable=self.light_matchonly_status_var, wraplength=300).pack(anchor="w", pady=(0, 8))
+        table = ttk.Frame(parent)
+        table.pack(fill="both", expand=True)
+        self.light_matchonly_table = ttk.Treeview(table, columns=("file", "status"), show="headings", height=12)
+        self.light_matchonly_table.heading("file", text="JSON file")
+        self.light_matchonly_table.heading("status", text="Load status")
+        self.light_matchonly_table.column("file", width=190)
+        self.light_matchonly_table.column("status", width=180)
+        self.light_matchonly_table.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(table, orient="vertical", command=self.light_matchonly_table.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(table, orient="horizontal", command=self.light_matchonly_table.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.light_matchonly_table.configure(yscrollcommand=scrollbar.set, xscrollcommand=horizontal.set)
+        table.columnconfigure(0, weight=1)
+        table.rowconfigure(0, weight=1)
+        ttk.Label(parent, text="Files in this folder are loaded into memory for later analysis.", wraplength=300).pack(anchor="w", pady=(8, 0))
+
+    def _plot_light_matchonly_heatmap(self, kind):
+        from dmts_light_heatmaps import plot_location_maps
+        try:
+            settings = {key: value.get().strip() for key, value in self.voltage_heatmap_vars.items()}
+            figure = plot_location_maps(self.light_matchonly_maps[kind], kind,
+                        title=f'{self.light_matchonly_folder.name} | LED testing {kind}',
+                        cmap=settings['cmap'],
+                        cmin=float(settings['cmin']) if kind == 'voltage' and settings['cmin'] else None,
+                        cmax=float(settings['cmax']) if kind == 'voltage' and settings['cmax'] else None)
+        except ValueError as exc:
+            messagebox.showerror('LED testing heatmap unavailable', str(exc), parent=self.root)
+            return
+        self._show_dmts_figure(figure, f'LED testing {kind} heatmap', '950x850')
+
+    def _browse_light_matchonly_folder(self):
+        folder = filedialog.askdirectory(parent=self.root, title="Select LED testing mouse folder",
+                                         initialdir=str(self.light_matchonly_folder) if self.light_matchonly_folder else self.default_nwb_folder)
+        if folder:
+            self._load_light_matchonly_folder(Path(folder))
+
+    def _load_light_matchonly_folder(self, folder=None):
+        folder = Path(folder) if folder is not None else self.light_matchonly_folder
+        if folder is None:
+            return
+        self._light_matchonly_generation += 1
+        generation = self._light_matchonly_generation
+        self.light_matchonly_folder = folder
+        self.light_matchonly_folder_var.set(str(folder))
+        self.light_matchonly_results = {}
+        self.light_matchonly_maps = {'performance': {}, 'voltage': {}}
+        self.light_matchonly_errors = {}
+        self.light_matchonly_table.delete(*self.light_matchonly_table.get_children())
+        self._light_matchonly_busy = True
+        self.light_matchonly_status_var.set("Loading JSON files...")
+        self._draw_dmts_canvas()
+        messages = queue.Queue()
+
+        def worker():
+            try:
+                paths = sorted((p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".json"), key=lambda p: p.name.casefold())
+                for path in paths:
+                    if generation != self._light_matchonly_generation:
+                        return
+                    try:
+                        with path.open("r", encoding="utf-8-sig") as source:
+                            payload = json.load(source)
+                        if not isinstance(payload, dict):
+                            raise ValueError("Expected a JSON dictionary at the top level.")
+                        messages.put(("loaded", path, payload))
+                    except Exception as exc:
+                        messages.put(("error", path, str(exc)))
+            except OSError as exc:
+                messages.put(("error", folder, str(exc)))
+            finally:
+                messages.put(("done", None, None))
+
+        def poll():
+            if generation != self._light_matchonly_generation:
+                return
+            finished = False
+            for _ in range(100):
+                try:
+                    kind, path, payload = messages.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "done":
+                    finished = True
+                    break
+                key = str(path.resolve())
+                if kind == "loaded":
+                    self.light_matchonly_results[key] = payload
+                    status = "Loaded"
+                else:
+                    self.light_matchonly_errors[key] = payload
+                    status = "Skipped: " + payload
+                self.light_matchonly_table.insert("", "end", iid=key, values=(path.name, status))
+            loaded, skipped = len(self.light_matchonly_results), len(self.light_matchonly_errors)
+            self.light_matchonly_status_var.set(f"{loaded} files loaded; {skipped} skipped" + ("." if finished else " — loading..."))
+            if finished:
+                self._light_matchonly_busy = False
+                from dmts_light_heatmaps import collect_location_maps
+                self.light_matchonly_maps = collect_location_maps(self.light_matchonly_results)
+                if not loaded and not skipped:
+                    self.light_matchonly_status_var.set("No JSON files found in this folder.")
+                self._draw_dmts_canvas()
+            else:
+                self.root.after(100, poll)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, poll)
 
 
     def _build_dmts_file_controls(self, dmts_file_tab):
@@ -316,7 +577,29 @@ class DmtsPanel:
         ax = self.canvas_ax
         ax.clear()
         ax.axis("off")
-        if self.dmts_file_notebook.select() == str(self.dmts_groups_tab):
+        if (self.dmts_file_notebook.select() == str(self.dmts_animal_tab)
+                and self.dmts_animal_notebook.select() == str(self.dmts_ls_tab)):
+            if self.ls_folder is not None:
+                busy = self._ls_busy
+                self.app._canvas_button(16, 16, "Running..." if busy else "Batch analysis", "dmts_ls_batch",
+                                        "#EEEEEE" if busy else "#F3FAF1", "#AAAAAA" if busy else "#59A14F", enabled=not busy, ax=ax)
+                if self.ls_results:
+                    self.app._canvas_button(182, 16, "Light vs Sound\nacross files", "dmts_ls_plot",
+                                            "#EEEEEE" if busy else "#F3FAF1", "#AAAAAA" if busy else "#59A14F", enabled=not busy, ax=ax)
+        elif (self.dmts_file_notebook.select() == str(self.dmts_animal_tab)
+                and self.dmts_animal_notebook.select() == str(self.dmts_light_matchonly_tab)):
+            if self.light_matchonly_folder is not None:
+                busy = self._light_matchonly_busy
+                self.app._canvas_button(16, 16, "Loading..." if busy else "Reload JSON files",
+                                        "dmts_light_load", "#EEEEEE" if busy else "#F3FAF1",
+                                        "#AAAAAA" if busy else "#59A14F", enabled=not busy, ax=ax)
+                if not busy:
+                    for x, kind, label in ((182, 'performance', 'Performance heatmap'),
+                                           (348, 'voltage', 'Voltage heatmap')):
+                        if self.light_matchonly_maps[kind]:
+                            self.app._canvas_button(x, 16, label + '\n10 × 10',
+                                    'dmts_light_' + kind, '#F3FAF1', '#59A14F', ax=ax)
+        elif self.dmts_file_notebook.select() == str(self.dmts_groups_tab):
             if self.dmts_group_exports:
                 self.app._canvas_button(16, 16, "Plot group\naverages", "dmts_groups_plot", "#F3FAF1", "#59A14F", ax=ax)
         elif self.dmts_file_notebook.select() == str(self.dmts_animal_tab):
@@ -345,6 +628,7 @@ class DmtsPanel:
                        (182, 82, "Plot Time Window", "dmts_pretraining"),
                        (348, 82, "Plot Trial-Aligned\nLicks", "dmts_matchonly"),
                        (182, 148, "Performance\nby StimID", "dmts_sound_performance"),
+                       (348, 148, "Light vs Sound\nperformance", "dmts_modality_performance"),
                        (514, 82, "Trial Examples", "dmts_trial_examples")]
             if self._dmts_export_ready:
                 actions.append((16, 82, "Export results", "dmts_file_export"))
@@ -530,6 +814,20 @@ class DmtsPanel:
 
 
     def _handle_dmts_canvas_pick(self, event) -> None:
+        if event.artist.get_gid() == "dmts_ls_batch":
+            self._run_ls_batch()
+            return
+        if event.artist.get_gid() == "dmts_ls_plot":
+            self._plot_ls_results()
+            return
+        if event.artist.get_gid() in ('dmts_light_performance', 'dmts_light_voltage'):
+            if not self._light_matchonly_busy:
+                self._plot_light_matchonly_heatmap(event.artist.get_gid().removeprefix('dmts_light_'))
+            return
+        if event.artist.get_gid() == "dmts_light_load":
+            if not self._light_matchonly_busy:
+                self._load_light_matchonly_folder()
+            return
         if event.artist.get_gid() == "dmts_performance_heatmap":
             self._open_dmts_performance_heatmap()
             return
@@ -561,6 +859,7 @@ class DmtsPanel:
             self._load_dmts_file()
             return
         actions = {"dmts_pretraining": self._run_dmts_pretraining,
+                   "dmts_modality_performance": self._open_dmts_modality_performance,
                    "dmts_trial_examples": self._open_dmts_trial_examples,
                    "dmts_matchonly": self._run_dmts_matchonly,
                    "dmts_summary": self._open_dmts_summary,
@@ -599,6 +898,15 @@ class DmtsPanel:
         self._show_dmts_figure(figure, "DMTS Hit by StimID across sessions", "1200x750")
 
 
+    def _open_dmts_modality_performance(self):
+        try:
+            from dmts_summary import plot_modality_performance
+            figure = plot_modality_performance(self._dmts_session, title=Path(self.dmts_file_var.get()).name)
+        except Exception as exc:
+            messagebox.showerror('Light vs Sound unavailable', str(exc), parent=self.root)
+            return
+        self._show_dmts_figure(figure, 'Light vs Sound performance', '1100x700')
+
     def _open_dmts_sound_performance(self) -> None:
         try:
             from dmts_summary import plot_performance_by_sound, performance_by_stim_data
@@ -623,6 +931,7 @@ class DmtsPanel:
             messagebox.showerror('Performance heatmap unavailable', str(exc), parent=self.root)
             return
         self._show_dmts_figure(figure, 'Performance heatmap — all positions', '950x850')
+        self._dmts_performance_by_location = dict(figure.heatmap_locations)
 
 
     def _open_dmts_summary(self) -> None:
@@ -787,6 +1096,31 @@ class DmtsPanel:
         window.title(title)
         self._write_dmts_file_output(f"Opened: {title}")
         window.geometry(geometry)
+        if hasattr(figure, 'heatmap_locations'):
+            # Capture this figure's data so later session changes cannot affect the export.
+            locations = dict(figure.heatmap_locations)
+            kind = figure.heatmap_kind
+            source_stem = Path(self.dmts_file_var.get()).stem
+            def save_dictionary():
+                filename = filedialog.asksaveasfilename(
+                    parent=window, title='Save heatmap dictionary by location',
+                    initialfile=f'{source_stem}_{kind}_by_location.json',
+                    defaultextension='.json',
+                    filetypes=[('JSON dictionary', '*.json'), ('Python dictionary (pickle)', '*.pkl')])
+                if not filename:
+                    return
+                try:
+                    if Path(filename).suffix.lower() == '.pkl':
+                        with open(filename, 'wb') as output:
+                            pickle.dump(locations, output, protocol=pickle.HIGHEST_PROTOCOL)
+                    else:
+                        import json
+                        Path(filename).write_text(json.dumps(locations, indent=2, allow_nan=False), encoding='utf-8')
+                except OSError as exc:
+                    messagebox.showerror('Save failed', str(exc), parent=window)
+                    return
+                self._write_dmts_file_output(f'Saved {kind} dictionary by location: {filename}')
+            ttk.Button(window, text='Save dictionary by location', command=save_dictionary).pack(side='top', pady=6)
         canvas = FigureCanvasTkAgg(figure, master=window)
         toolbar = NavigationToolbar2Tk(canvas, window, pack_toolbar=False)
         toolbar.update()
@@ -1002,6 +1336,7 @@ class DmtsPanel:
                 if trials is not None and all(name in trials for name in ("sample_sound_ids", "test_sound_ids", "HMCF")):
                     self._dmts_file_actions.add("dmts_summary")
                     self._dmts_file_actions.add("dmts_sound_performance")
+                    self._dmts_file_actions.add("dmts_modality_performance")
                     if all(f"acquisition/{name}/data" in handle for name in ("LeftLick", "RightLick")):
                         self._dmts_file_actions.add("dmts_matchonly")
                         self._dmts_file_actions.add("dmts_trial_examples")
@@ -1011,6 +1346,8 @@ class DmtsPanel:
 
 
     def _update_dmts_voltage_button(self):
+        self._dmts_voltage_by_location = {}
+        self._dmts_performance_by_location = {}
         self._dmts_performance_pairs = {}
         self._dmts_voltage_averages = {}
         self._dmts_csv_trials = []
@@ -1023,6 +1360,8 @@ class DmtsPanel:
 
 
     def _dmts_csv_loaded(self, path, trials):
+        self._dmts_voltage_by_location = {}
+        self._dmts_performance_by_location = {}
         self._dmts_voltage_averages = {}
         self._dmts_csv_path = path
         self._dmts_csv_trials = trials
@@ -1058,6 +1397,7 @@ class DmtsPanel:
             messagebox.showerror('Voltage heatmap unavailable', str(exc), parent=self.root)
             return
         self._show_dmts_figure(figure, 'Average voltage heatmap — all positions', '950x850')
+        self._dmts_voltage_by_location = dict(figure.heatmap_locations)
 
 
     def _dmts_voltage_logs(self):

@@ -8,7 +8,7 @@ from nwb_obj import session_data_nwb
 
 
 class LEDReaderTests(unittest.TestCase):
-    def read(self, source, include_light=True):
+    def read(self, source, include_light=True, sounds=None):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
             path = Path(folder) / 'session.nwb'
             with h5py.File(path, 'w') as f:
@@ -23,6 +23,9 @@ class LEDReaderTests(unittest.TestCase):
                 if include_light:
                     t['sample_light_id'] = [0, 3]
                     t['test_light_id'] = [0, 3]
+                if sounds is not None:
+                    for name in ('sound_ids', 'sample_sound_ids', 'test_sound_ids'):
+                        t[name][:] = sounds
                 t['dmts_light_confirmed'] = [1, 1]
             reader = session_data_nwb(nwbfile=path)
             reader.generate_results_table()
@@ -41,6 +44,16 @@ class LEDReaderTests(unittest.TestCase):
     def test_missing_led_ids_fails_explicitly(self):
         with self.assertRaisesRegex(ValueError, 'sample_light_id'):
             self.read('LED', include_light=False)
+
+    def test_mixed_selects_modality_per_trial(self):
+        table = self.read('mixed', sounds=[98, 0])
+        np.testing.assert_array_equal(table.SampleSoundId, [98, 3])
+        np.testing.assert_array_equal(table.TestSoundId, [98, 3])
+        self.assertEqual(table.StimulusSource.tolist(), ['Sound', 'LED'])
+
+    def test_mixed_rejects_simultaneous_modalities(self):
+        with self.assertRaisesRegex(ValueError, 'both sound and light'):
+            self.read('mixed', sounds=[0, 98])
 
 
 if __name__ == '__main__':

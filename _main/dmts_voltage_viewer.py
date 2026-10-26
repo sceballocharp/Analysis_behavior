@@ -233,6 +233,11 @@ def plot_voltage_position_heatmap(means, title="Average voltage by position",
     fig = plot_voltage_stim_heatmaps({'All positions': group}, ['All positions'], title,
                                      cmin=cmin, cmax=cmax, cmap=cmap)
     fig.axes[0].set_title('All measured positions')
+    fig.heatmap_locations = {
+        f'P{p}N{n}': float(np.mean(positions[f'P{p}N{n}'])) if f'P{p}N{n}' in positions else None
+        for n in range(1, 11) for p in range(1, 11)
+    }
+    fig.heatmap_kind = 'voltage_V'
     fig.set_size_inches(9, 8)
     fig.texts[-1].set_text('Each cell: mean of per-StimID voltage averages at that position (equal weight per StimID).\n'
                           'Gray: no measurements. P increases right; N increases up. Measurements are per P channel.')

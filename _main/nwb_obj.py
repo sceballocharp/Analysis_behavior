@@ -236,17 +236,27 @@ class session_data_nwb():
                 for k, v in zip(h5f['acquisition/Parameters/key'][:],
                                 h5f['acquisition/Parameters/value'][:])
             }
-            if params.get('DMTSStimulusSource', '').strip().upper() == 'LED':
+            stimulus_source = params.get('DMTSStimulusSource', '').strip().upper()
+            if stimulus_source in ('LED', 'LIGHT', 'MIXED'):
                 required = ('sample_light_id', 'test_light_id')
                 if any(name not in trials_group for name in required):
                     raise ValueError('LED DMTS requires sample_light_id and test_light_id.')
                 data['SampleLightId'] = np.asarray(trials_group['sample_light_id'])
                 data['TestLightId'] = np.asarray(trials_group['test_light_id'])
                 # Existing DMTS consumers use these compatibility column names.
-                data['SampleSoundId'] = data['SampleLightId']
-                data['TestSoundId'] = data['TestLightId']
-                data['SoundId'] = data['SampleLightId']
-                data['StimulusSource'] = 'LED'
+                light_rows = ((data['SampleLightId'] != 0) | (data['TestLightId'] != 0))
+                if stimulus_source in ('LED', 'LIGHT'):
+                    light_rows = np.ones(ntrials, dtype=bool)
+                data['RecordedSampleSoundId'] = data.get('SampleSoundId', np.zeros(ntrials, dtype=int)).copy()
+                data['RecordedTestSoundId'] = data.get('TestSoundId', np.zeros(ntrials, dtype=int)).copy()
+                if stimulus_source == 'MIXED' and np.any(light_rows & (
+                        (data['RecordedSampleSoundId'] != 0) | (data['RecordedTestSoundId'] != 0))):
+                    raise ValueError('Mixed DMTS trial has both sound and light IDs; cannot select its modality safely.')
+                data['SampleSoundId'] = np.where(light_rows, data['SampleLightId'], data['RecordedSampleSoundId'])
+                data['TestSoundId'] = np.where(light_rows, data['TestLightId'], data['RecordedTestSoundId'])
+                data['SoundId'] = data['SampleSoundId'].copy()
+                data['StimulusSource'] = np.where(light_rows, 'LED', np.where(
+                    (data['SampleSoundId'] != 0) | (data['TestSoundId'] != 0), 'Sound', 'Blank'))
             for name in trials_group:
                 if name.startswith('dmts_light_'):
                     values = np.asarray(trials_group[name])

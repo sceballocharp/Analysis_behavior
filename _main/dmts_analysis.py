@@ -86,7 +86,8 @@ def analyze_dmts(session):
         if not np.isfinite(start):
             raise ValueError(f'DMTS trial {index + 1} has no valid start time.')
         timing = 'trial start_time' if 'StartTime' in table else 'trial marker (0.1 s resolution)'
-        candidates = [t for t, sid in sound_onsets if sid == sample and abs(t - start) <= 0.051]
+        candidates = [t for t, sid in sound_onsets if sid == sample and abs(t - start) <= 0.051
+                      and row.get('StimulusSource', 'Sound') != 'LED']
         if candidates and kind != 'blank':
             start = min(candidates, key=lambda t: abs(t - start))
             timing = 'recorded sound onset + protocol durations'

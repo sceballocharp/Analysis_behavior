@@ -152,8 +152,9 @@
             "from": "dmts_load",
             "to": "dmts_pretraining"
           },
-          {"from": "dmts_load",
-           "to": "dmts_sound_performance"
+          {
+            "from": "dmts_load",
+            "to": "dmts_sound_performance"
           }
         ],
         "Animal": [
@@ -174,7 +175,13 @@
             "to": "dmts_batch_outcome_counts"
           }
         ],
-        "Groups": []
+        "Groups": [],
+        "Animal / L&S": [
+          {
+            "from": "dmts_ls_batch",
+            "to": "dmts_ls_plot"
+          }
+        ]
       },
       "Lever": {
         "File": [

@@ -58,6 +58,20 @@ class HitSourceTests(unittest.TestCase):
         self.assertIsNotNone(events)
         self.assertEqual(analysis["stay_threshold_ms"], 500)
 
+    def test_current_threshold_names_in_nwb_and_raw_parameters(self):
+        for params in ({b"hit_threshold_percent": b"75.0"},
+                       {"HITThreshold_percent": "75"},
+                       pd.DataFrame({"UserName=Sebastian": ["HITThreshold_percent=75"]}),
+                       pd.DataFrame(columns=["HITThreshold_percent=75"]),
+                       pd.DataFrame({"hit_threshold_percent": [75]})):
+            with self.subTest(params=repr(params)):
+                self.assertEqual(behavior._ir_stay_threshold_ms({"parameters": params}), 750)
+
+    def test_current_threshold_still_rejects_invalid_values(self):
+        for value in ("", "bad", -1, 101, float("nan")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                behavior._ir_stay_threshold_ms({"parameters": {"hit_threshold_percent": value}})
+
     def test_fewer_than_five_lick_events_is_not_a_hit(self):
         self.session["dataIR"]["full"][1550:1560] = 0
         hits = behavior.analyze_session_responses(self.session, "Licks")[2]

@@ -342,22 +342,25 @@ def extract_performance(session_datadict):
 def _ir_stay_threshold_ms(session, reward_window_ms=1000):
     """Read the session's required IR occupancy percentage (NWB or raw folder)."""
     params = session.get("parameters", {})
+    percentage_keys = ("hit_threshold_percent", "HITThreshold_percent", "percIRFork")
     if isinstance(params, pd.DataFrame):
         parsed = read_params(params)
-        if "percIRFork" in params.columns and not params.empty:
-            parsed["percIRFork"] = params["percIRFork"].iloc[0]
+        for key in percentage_keys:
+            if key in params.columns and not params.empty:
+                parsed[key] = params[key].iloc[0]
         # Raw CSV headers can contain the first key=value parameter.
         for column in params.columns:
             for token in str(column).split():
-                if token.startswith("percIRFork="):
-                    parsed.setdefault("percIRFork", token.split("=", 1)[1])
+                key, separator, candidate = token.partition("=")
+                if separator and key in percentage_keys:
+                    parsed.setdefault(key, candidate)
         params = parsed
+    params = {(key.decode("utf-8") if isinstance(key, bytes) else str(key)).strip(): candidate
+              for key, candidate in params.items()}
     value = None
-    for key, candidate in params.items():
-        if isinstance(key, bytes):
-            key = key.decode("utf-8")
-        if str(key).strip() == "percIRFork":
-            value = candidate
+    for key in percentage_keys:
+        if key in params:
+            value = params[key]
             break
     if isinstance(value, (list, tuple, np.ndarray)):
         value = np.asarray(value).reshape(-1)
@@ -367,7 +370,7 @@ def _ir_stay_threshold_ms(session, reward_window_ms=1000):
     try:
         percent = float(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError("Missing or invalid session parameter percIRFork (expected 0 to 100).") from exc
+        raise ValueError("Missing or invalid session parameter hit_threshold_percent / HITThreshold_percent / percIRFork (expected 0 to 100).") from exc
     if not np.isfinite(percent) or not 0 <= percent <= 100:
         raise ValueError("percIRFork must be a finite percentage from 0 to 100.")
     if not np.isfinite(reward_window_ms) or reward_window_ms <= 0:

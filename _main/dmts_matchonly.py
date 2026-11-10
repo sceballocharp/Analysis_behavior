@@ -9,8 +9,14 @@ from dmts_analysis import analyze_dmts, signal_times, is_dmts_lick
 
 def plot_matchonly(session, threshold_v=1.0, smooth_ms=0.0, bin_width_s=0.1,
                    pre_s=0.5, post_s=0.5, trace_height=0.7, max_plot_points=800,
-                   file_path="DMTS session"):
-    """Return the grouped figure, events, histogram and original trial mapping."""
+                   file_path="DMTS session", normalize_histogram=False):
+    """Return figure, events, histogram and original trial mapping.
+
+    normalize_histogram displays percent of aligned licks per bin, separately
+    for each side and trial kind. Each nonempty curve sums to 100%; zero-lick
+    curves stay zero. The denominator includes only the displayed time window
+    (aligned occurrences, which can repeat if trial windows overlap).
+    """
     file_path = Path(file_path)
     if not np.all(np.isfinite([threshold_v, smooth_ms, bin_width_s, pre_s,
                               post_s, trace_height, max_plot_points])):
@@ -305,9 +311,11 @@ def plot_matchonly(session, threshold_v=1.0, smooth_ms=0.0, bin_width_s=0.1,
 
             counts = counts_by_kind[kind]
             total_events += int(counts.sum())
+            group_licks = int(counts.sum())
+            fractions = counts / group_licks if group_licks else np.zeros_like(counts, dtype=float)
 
             hist_ax.stairs(
-                counts, bins,
+                100 * fractions if normalize_histogram else counts, bins,
                 color=group_colors[kind],
                 linewidth=1.4,
                 label=f"{group_labels[kind]} (n={n_group})"
@@ -321,6 +329,9 @@ def plot_matchonly(session, threshold_v=1.0, smooth_ms=0.0, bin_width_s=0.1,
                 "bin_end_s": bins[1:],
                 "bin_center_s": (bins[:-1] + bins[1:]) / 2,
                 "lick_count": counts,
+                "total_aligned_licks": group_licks,
+                "lick_fraction": fractions,
+                "lick_percent": 100 * fractions,
             }))
 
         top_ax.set_title(f"{side} licks — {total_events} aligned events")
@@ -336,7 +347,9 @@ def plot_matchonly(session, threshold_v=1.0, smooth_ms=0.0, bin_width_s=0.1,
     axes[0, 0].set_yticks(np.arange(1, len(trials) + 1, tick_step))
     axes[0, 0].set_ylim(0.5, len(trials) + 1)
     axes[0, 0].set_ylabel("Grouped trial row + scaled lick voltage")
-    axes[1, 0].set_ylabel(f"Lick count\nper {bin_width_s:g} s bin")
+    axes[1, 0].set_ylabel(
+        f"Aligned licks (%)\nper {bin_width_s:g} s bin" if normalize_histogram
+        else f"Lick count\nper {bin_width_s:g} s bin")
     axes[1, 0].set_ylim(bottom=0)
 
     fig.suptitle(

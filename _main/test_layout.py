@@ -310,7 +310,7 @@ class WorkflowDmtsPanel(DmtsPanel):
             found = lambda: len(self.dmts_animal_nwb_files)>1 and self._dmts_folder_scan_poll is None
             results = lambda: bool(self.dmts_batch_results) and not self._dmts_batch_running
             nodes = [
-                Node('wf_folder','Choose mouse folder',0,0,self._browse_dmts_mouse_folder,done=found),
+                Node('wf_folder','Choose mouse folder',0,0,self._browse_dmts_mouse_folder,done=found,busy=lambda:self._dmts_folder_scan_poll is not None),
                 Node('wf_pkl','Load batch PKL',0,2,self._load_dmts_batch,done=results),
                 Node('wf_batch','Run batch analysis',1,0,self._run_dmts_batch,found,results,lambda:self._dmts_batch_running,settings=lambda:self.dmts_silent_match_var.get(),after=('wf_folder',)),
                 Node('wf_batch_plot','Session performance',2,0,self._plot_dmts_batch,results,settings=lambda:self.dmts_show_engaged_var.get(),after=('wf_batch',),optional=('wf_pkl',)),
@@ -405,13 +405,13 @@ class WorkflowApp(ScanMediaFoldersApp):
                 Node('wf_go_vars','Session variables',2,4,self._open_session_console,loaded,after=('wf_go_run',)),
             ]
         elif mode=='Animal':
-            found=lambda:bool(self.found_nwb_files or self.found_session_folders)
-            results=lambda:bool(self.batch_performance_by_file)
+            found=lambda:bool(self.found_nwb_files or self.found_session_folders) and not self.nwb_loading
+            results=lambda:bool(self.batch_performance_by_file) and not self._gonogo_batch_running
             run=lambda:self._run_all_found_nwb_files() if self.active_input=='file' else self._run_all_found_session_folders()
             nodes=[
-                Node('wf_find_nwb','Find NWB files',0,0,self._find_nwb_files_for_animal,done=lambda:bool(self.found_nwb_files)),
-                Node('wf_find_folders','Find folders',0,2,self._find_session_folders_for_animal,done=lambda:bool(self.found_session_folders)),
-                Node('wf_go_batch','Analyze all sessions',1,0,run,found,results,settings=lambda:self.hit_source_var.get(),after=('wf_find_nwb',),optional=('wf_find_folders',)),
+                Node('wf_find_nwb','Find NWB files',0,0,self._find_nwb_files_for_animal,done=lambda:bool(self.nwb_scanned_files),busy=lambda:self.nwb_loading and self._gonogo_search_kind=='nwb'),
+                Node('wf_find_folders','Find folders',0,2,self._find_session_folders_for_animal,done=lambda:bool(self.found_session_folders),busy=lambda:self.nwb_loading and self._gonogo_search_kind=='folder'),
+                Node('wf_go_batch','Analyze all sessions',1,0,run,lambda:found() and not self._gonogo_batch_running,results,lambda:self._gonogo_batch_running,settings=lambda:self.hit_source_var.get(),after=('wf_find_nwb',),optional=('wf_find_folders',)),
                 Node('wf_go_batch_plot','Batch performance',2,0,self._open_batch_session_performance_plot,results,after=('wf_go_batch',)),
                 Node('wf_go_batch_save','Export batch PKL',3,0,self._export_batch_data,results,after=('wf_go_batch',)),
             ]

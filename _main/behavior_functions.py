@@ -4,6 +4,7 @@ Utilities to load and summarize mouse behavior sessions.
 """
 
 from pathlib import Path
+from session_order import ordered_sessions, session_start_time
 import pickle
 
 import numpy as np
@@ -953,6 +954,7 @@ def run_nwb_batch_analysis(
             datestring = _get_session_date(data_session_dict, nwb_path)
             session_payload["params"] = data_session_dict["parameters"]
             session_payload["data"] = single_session_performance
+            session_payload["session_start_time"] = session_start_time(data_session_dict)
             session_payload["hit_by_sound"] = single_hit_by_sound
 
             unique_key = datestring
@@ -976,7 +978,7 @@ def run_nwb_batch_analysis(
         "nwb_root": str(nwb_root),
         "n_files": len(matching_files),
         "hit_source": hit_source,
-        "performance_by_file": performance_by_file,
+        "performance_by_file": ordered_sessions(performance_by_file),
         "hit_by_sound": batch_hit_by_sound,
         "trials_by_sound_id": trials_by_sound_id,
         "matching_files": matching_files,

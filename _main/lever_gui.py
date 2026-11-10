@@ -298,8 +298,10 @@ class LeverPanel:
         self.data = None
         self.busy = False
         self.generation = 0
+        self.status_var = tk.StringVar(value="Choose an NWB file")
         self.viewer = None
         ttk.Button(left, text="Browse NWB", command=self.browse).pack(fill="x")
+        ttk.Label(left, textvariable=self.status_var, wraplength=300).pack(anchor="w", pady=6)
         self.viewer_button = ttk.Button(left, text="Trial Viewer", state="disabled", command=self.open_viewer)
         self.viewer_button.pack(fill="x", pady=6)
         ttk.Label(left, textvariable=self.filename, wraplength=300).pack(anchor="w")
@@ -394,6 +396,7 @@ class LeverPanel:
             self.viewer_button.configure(state="disabled")
             self.log(f"Selected: {path}")
             self.draw()
+            self.load()
 
     def draw(self):
         self.ax.clear()
@@ -419,6 +422,7 @@ class LeverPanel:
         self.viewer_button.configure(state="disabled")
         path, generation = self.filename.get(), self.generation
         self.log(f"Loading: {path}")
+        self.status_var.set("Loading NWB and analyzing lever trials...")
         self.draw()
         messages = queue.Queue()
         def worker():
@@ -437,9 +441,11 @@ class LeverPanel:
             self.busy = False
             self.data = data
             if error:
+                self.status_var.set("NWB loading failed")
                 self.log(f"Load failed: {error}")
                 messagebox.showerror("Lever NWB", error, parent=self.root)
             else:
+                self.status_var.set(f"Done: {len(data['starts'])} trials loaded")
                 self.log(f"Loaded {len(data['starts'])} trials. Channels: {', '.join(data['signals'])}")
                 channels = [name for name, signal in data['signals'].items()
                             if any(word in name.lower() for word in ('behaviorsignal', 'irfork', 'lever', 'force', 'position'))

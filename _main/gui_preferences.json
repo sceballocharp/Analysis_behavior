@@ -140,7 +140,12 @@
             "to": "export_batch_data"
           }
         ],
-        "Groups": []
+        "Groups": [
+          {
+            "from": "load_group_trial_data",
+            "to": "plot_first_session_fork_duration"
+          }
+        ]
       },
       "DMTS": {
         "File": [
@@ -201,5 +206,15 @@
     "starting_margin_px": 15,
     "horizontal_gap_px": 25,
     "vertical_gap_px": 25
-  }
+  },
+  "group_trial_data_sources": [
+    {
+      "group": "SC",
+      "path": "Y:/Data/Behavior/Sebastian/GoNoGo_FM_SC/1_Full/pkl_files/SC_gonogo_allAnimals_dataframes"
+    },
+    {
+      "group": "AMEL",
+      "path": "Y:/Data/Behavior/Sebastian/GoNoGo_FM_Amel/1_Full/pkl_files/AMEL_gonogo_allAnimals_dataframes"
+    }
+  ]
 }

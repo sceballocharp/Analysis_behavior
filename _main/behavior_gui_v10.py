@@ -2,7 +2,10 @@
 
 from pathlib import Path
 from collections import Counter
+from session_order import ordered_sessions, session_start_time
+from animal_work import scan_sessions, discovery_status, discovery_complete, batch_complete
 import threading
+import queue
 import math
 import ast
 import io
@@ -91,10 +94,16 @@ class ScanMediaFoldersApp:
         self.group_name_var = tk.StringVar(value="")
         self.group_exports = {}
         self.group_folder = None
+        self.group_folders = []
+        self.group_trial_data = {}
+        self._group_trial_data_loading = False
         self.groups_loading = False
         self.group_folder_var = tk.StringVar(value="No folder selected")
         self.nwb_search_root = None
         self.nwb_loading = False
+        self._gonogo_search_generation = 0
+        self._gonogo_search_cancel = None
+        self._gonogo_search_kind = None
         self.nwb_scanned_files: list[Path] = []
         self.nwb_group_var = tk.StringVar(value="")
         self.found_nwb_files: list[Path] = []
@@ -106,6 +115,8 @@ class ScanMediaFoldersApp:
         self.current_folder_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready")
         self.is_running = False
+        self._gonogo_batch_running = False
+        self._gonogo_batch_generation = getattr(self, "_gonogo_batch_generation", 0) + 1
         self.scan_generation = 0
         self.trial_viewer_button: ttk.Button | None = None
         self.trial_viewer_window = None
@@ -308,7 +319,10 @@ class ScanMediaFoldersApp:
 
     def _build_gonogo_groups_controls(self, groups_controls) -> None:
         """Build the group file table and assignment controls."""
-        ttk.Button(self.groups_table_panel, text="Select PKL folder", command=self._load_group_folder).pack(anchor="w")
+        folder_buttons = ttk.Frame(self.groups_table_panel)
+        folder_buttons.pack(anchor="w")
+        ttk.Button(folder_buttons, text="Select PKL folder", command=self._load_group_folder).pack(side="left")
+        ttk.Button(folder_buttons, text="Add PKL folder", command=lambda: self._load_group_folder(append=True)).pack(side="left", padx=(6, 0))
         ttk.Label(self.groups_table_panel, textvariable=self.group_folder_var, wraplength=1300).pack(anchor="w", pady=(6, 8))
         group_list_frame = ttk.Frame(self.groups_table_panel)
         group_list_frame.pack(fill="both", expand=True)
@@ -412,12 +426,12 @@ class ScanMediaFoldersApp:
         )
         search_buttons = ttk.Frame(meta_tab)
         search_buttons.grid(row=0, column=0, sticky="w")
-        ttk.Button(
-            search_buttons, text="Find NWB files", command=self._find_nwb_files_for_animal,
-        ).pack(side="left")
-        ttk.Button(
-            search_buttons, text="Find folders", command=self._find_session_folders_for_animal,
-        ).pack(side="left", padx=(8, 0))
+        self.find_nwb_button = ttk.Button(
+            search_buttons, text="Find NWB files", command=self._find_nwb_files_for_animal)
+        self.find_nwb_button.pack(side="left")
+        self.find_folders_button = ttk.Button(
+            search_buttons, text="Find folders", command=self._find_session_folders_for_animal)
+        self.find_folders_button.pack(side="left", padx=(8, 0))
         detected_animal_frame = ttk.Frame(meta_tab)
         detected_animal_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(detected_animal_frame, text="Detected animal:").pack(anchor="w")
@@ -559,12 +573,20 @@ class ScanMediaFoldersApp:
 
     def _reset_session(self) -> None:
         self._single_input_selected = False
+        self._gonogo_search_generation += 1
+        if self._gonogo_search_cancel is not None:
+            self._gonogo_search_cancel.set()
+        self.nwb_loading = False
+        self._gonogo_search_kind = None
+        self._refresh_gonogo_animal_controls()
         # Ignore any worker results belonging to the previous selection.
         self._close_session_console()
         self.console_namespace = {}
         self.console_session = None
         self.scan_generation += 1
         self.is_running = False
+        self._gonogo_batch_running = False
+        self._gonogo_batch_generation = getattr(self, "_gonogo_batch_generation", 0) + 1
         self._close_trial_viewer()
         for name in (
             "session_target_folder", "single_session_datadict", "single_session_performance",
@@ -593,9 +615,9 @@ class ScanMediaFoldersApp:
 
     def _browse_folder(self) -> None:
         initial_dir = self.folder_var.get() or "."
-        self._reset_session()
         selected = filedialog.askdirectory(initialdir=initial_dir)
         if selected:
+            self._reset_session()
             self.active_input = "folder"
             if not self.hit_source_var.get():
                 self.hit_source_var.set("IR")
@@ -604,21 +626,22 @@ class ScanMediaFoldersApp:
             self.folder_var.set(selected)
             self._sync_current_input_label()
             self._draw_selected_input_box()
+            self._start_scan()
 
     def _browse_nwb(self):
         initial_dir = self.file_var.get() or "."
-        self._reset_session()
         selected = filedialog.askopenfilename(
             initialdir=initial_dir,
             filetypes=[("NWB files", "*.nwb"), ("All files", "*.*")],
         )
         if selected:
+            self._reset_session()
             self.active_input = "file"
             self._single_input_selected = True
             self.file_var.set(selected)
-            self._detect_nwb_hit_source(selected)
             self._sync_current_input_label()
             self._draw_selected_input_box()
+            self._detect_nwb_hit_source(selected)
 
     def _manual_hit_source(self):
         self.hit_source_status_var.set(f"Manual override: {self.hit_source_var.get()} (rerun to apply).")
@@ -630,8 +653,8 @@ class ScanMediaFoldersApp:
         value = str(value).strip().casefold()
         return {"ir": "IR", "infrared": "IR", "irfork": "IR", "lick": "Licks", "licks": "Licks"}.get(value)
 
-    def _detect_nwb_hit_source(self, filename):
-        self.hit_source_var.set("")
+    @staticmethod
+    def _read_nwb_hit_source(filename):
         source = None
         detail = "TriggerType missing"
         try:
@@ -642,19 +665,47 @@ class ScanMediaFoldersApp:
                     for key, value in zip(group["key"][:], group["value"][:]):
                         key = key.decode("utf-8", errors="replace") if isinstance(key, bytes) else str(key)
                         if key.strip().casefold().replace("_", "") == "triggertype":
-                            source = self._normalize_trigger_type(value)
+                            source = ScanMediaFoldersApp._normalize_trigger_type(value)
                             raw = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
                             detail = f"TriggerType={raw}"
                             break
         except (OSError, ValueError, TypeError) as exc:
             detail = f"Cannot read metadata: {exc}"
-        if source:
-            self.hit_source_var.set(source)
-            message = f"Detected {source} ({detail}). Manual override available."
-        else:
-            message = f"Hit source unknown ({detail}). Select IR or Licks before running."
-        self.hit_source_status_var.set(message)
-        self._write_output(message + "\n")
+        return source, detail
+
+    def _detect_nwb_hit_source(self, filename):
+        self.hit_source_var.set("")
+        self._set_running_state(True)
+        self.status_var.set("Reading NWB metadata...")
+        generation = self.scan_generation
+        messages = queue.Queue()
+        def worker():
+            try:
+                messages.put(self._read_nwb_hit_source(filename))
+            except Exception as exc:
+                messages.put((None, f"Cannot read metadata: {exc}"))
+        def poll():
+            if generation != self.scan_generation:
+                return
+            try:
+                source, detail = messages.get_nowait()
+            except queue.Empty:
+                self.root.after(100, poll)
+                return
+            self._set_running_state(False)
+            if source:
+                self.hit_source_var.set(source)
+                message = f"Detected {source} ({detail}). Manual override available."
+            else:
+                message = f"Hit source unknown ({detail}). Select IR or Licks before running."
+            self.hit_source_status_var.set(message)
+            self._write_output(message + "\n")
+            if source:
+                self._start_scan()
+            else:
+                self.status_var.set("Choose IR or Licks, then run analysis")
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, poll)
 
     @staticmethod
     def _infer_animal_name_from_nwb_filename(nwb_path: Path) -> str | None:
@@ -730,212 +781,221 @@ class ScanMediaFoldersApp:
             self._write_output(f"  {path}\n")
         self._draw_selected_input_box()
 
+    def _refresh_gonogo_animal_controls(self):
+        for name, kind, label in (("find_nwb_button", "nwb", "Find NWB files"),
+                                  ("find_folders_button", "folder", "Find folders")):
+            button = getattr(self, name, None)
+            if button is not None:
+                busy = self.nwb_loading and self._gonogo_search_kind == kind
+                button.configure(text="Running..." if busy else label,
+                                 state="disabled" if busy else "normal")
+        self.nwb_group_selector.configure(state="disabled" if self.nwb_loading else "readonly")
+
     def _find_nwb_files_for_animal(self) -> None:
-        root_dir = filedialog.askdirectory(
-            title="Choose a folder containing NWB sessions",
-            initialdir=self.default_nwb_folder,
-        )
-        if not root_dir:
+        root_dir = filedialog.askdirectory(title="Choose a folder containing NWB sessions",
+                                           initialdir=self.default_nwb_folder)
+        if root_dir:
+            self._start_gonogo_animal_search(Path(root_dir), "nwb")
+
+    def _find_session_folders_for_animal(self) -> None:
+        animal = self.animal_var.get().strip()
+        if not animal:
+            messagebox.showerror("Missing animal name", "Please enter an animal name first.")
             return
-        root_path = Path(root_dir)
+        root_dir = filedialog.askdirectory(initialdir=self.folder_var.get() or ".")
+        if root_dir:
+            self._start_gonogo_animal_search(Path(root_dir), "folder", animal)
+
+    def _start_gonogo_animal_search(self, folder, kind, animal=""):
         self._reset_session()
+        self.animal_var.set(animal)
         self.nwb_groups = {}
         self.nwb_scanned_files = []
         self.nwb_search_root = None
         self.nwb_group_var.set("")
         self.nwb_group_selector.configure(values=())
         self.nwb_loading = True
-        self.status_var.set("Loading ...")
-        self._draw_selected_input_box()
-        self.root.update_idletasks()
-        try:
-            paths = [path for path in root_path.rglob("*")
-                     if path.is_file() and path.suffix.lower() == ".nwb"]
-            groups, unidentified = self._group_nwb_files(paths)
-        except OSError as exc:
-            self.status_var.set("NWB search failed")
-            messagebox.showerror("NWB search failed", str(exc))
-            return
-        finally:
-            self.nwb_loading = False
-            self._draw_selected_input_box()
-        self.nwb_scanned_files = paths
-        self.nwb_search_root = root_path
-        self.nwb_groups = groups
-        animals = sorted(groups, key=str.casefold)
-        self.nwb_group_selector.configure(values=animals)
-        self.nwb_group_var.set("")
-        self._write_output(f"Scanned {root_path}: {len(paths)} NWB file(s), {len(groups)} animal group(s).\n")
-        for animal in animals:
-            self._write_output(f"  {animal}: {len(groups[animal])} file(s)\n")
-        if unidentified:
-            self._write_output("Animal could not be identified for these files (not included in Run All NWB):\n")
-            for path in unidentified:
-                self._write_output(f"  {path}\n")
-        if animals:
-            self.status_var.set(f"Found {len(animals)} animals - select an animal")
-        else:
-            self.status_var.set("No identifiable NWB animal groups found")
-            messagebox.showinfo("No animal groups", "No identifiable NWB animal groups found. See Output for details.")
+        self._gonogo_search_kind = kind
+        cancel = threading.Event()
+        self._gonogo_search_cancel = cancel
+        generation = self._gonogo_search_generation
+        messages = queue.Queue()
+        paths, warnings, errors = [], [], []
+        self.status_var.set("Scanning subfolders...")
+        self._write_output(f"Searching: {folder}\n")
+        self._refresh_gonogo_animal_controls()
         self._draw_selected_input_box()
 
-    def _find_session_folders_for_animal(self) -> None:
-        animal_name = self.animal_var.get().strip()
-        if not animal_name:
-            messagebox.showerror("Missing animal name", "Please enter an animal name first.")
-            return
+        def poll():
+            if cancel.is_set() or generation != self._gonogo_search_generation:
+                return
+            for _ in range(100):
+                try:
+                    event, payload = messages.get_nowait()
+                except queue.Empty:
+                    break
+                if event == "progress":
+                    directories, found = payload
+                    paths.extend(found)
+                    self.status_var.set(discovery_status(directories, len(paths), kind))
+                    for path in found:
+                        self._write_output(f"{path}\n")
+                elif event in ("warning", "error"):
+                    (warnings if event == "warning" else errors).append(payload)
+                    self._write_output(f"{event.title()}: {payload}\n")
+                else:
+                    self.nwb_loading = False
+                    self._gonogo_search_kind = None
+                    if kind == "nwb":
+                        self.nwb_scanned_files = sorted(paths)
+                        self.nwb_search_root = folder
+                        self.nwb_groups, unidentified = self._group_nwb_files(paths)
+                        animals = sorted(self.nwb_groups, key=str.casefold)
+                        self.nwb_group_selector.configure(values=animals)
+                        summary = discovery_complete(len(paths), kind, len(warnings))
+                        if animals:
+                            summary += f" {len(animals)} animals; select an animal."
+                        elif paths:
+                            summary += " Enter an animal name and use Search name."
+                        for path in unidentified:
+                            self._write_output(f"Animal unidentified: {path}\n")
+                    else:
+                        self.found_session_folders = sorted(paths)
+                        self.active_input = "folder"
+                        self.current_folder_var.set(f"Animal {animal} | {len(paths)} session folders")
+                        summary = discovery_complete(len(paths), kind, len(warnings))
+                    if errors:
+                        summary = "Search failed: " + errors[-1]
+                    self.status_var.set(summary)
+                    self._write_output(summary + "\n")
+                    self._refresh_gonogo_animal_controls()
+                    self._draw_selected_input_box()
+                    return
+            self.root.after(100, poll)
 
-        root_dir = filedialog.askdirectory(initialdir=self.folder_var.get() or ".")
-        if not root_dir:
-            return
-
-        root_path = Path(root_dir)
-        matching_folders = _find_session_folders_for_animal(root_path, animal_name)
-
-        if not matching_folders:
-            messagebox.showinfo(
-                "No folders found",
-                f"No raw session folders found for animal '{animal_name}' in:\n{root_path}",
-            )
-            self._write_output(
-                f"No raw session folders found for animal '{animal_name}' under {root_path}\n"
-            )
-            return
-
-        self.found_session_folders = matching_folders
-        self.found_nwb_files = []
-        self.active_input = "folder"
-        self.current_folder_var.set(f"Animal {animal_name} | {len(matching_folders)} session folders")
-        self._write_output(f"Found {len(self.found_session_folders)} session folder(s) for '{animal_name}'. \n")
-        for folder in self.found_session_folders:
-            self._write_output(str(folder) + "\n")
-        self._draw_selected_input_box()
+        threading.Thread(target=scan_sessions, args=(folder, kind, animal, cancel, messages), daemon=True).start()
+        self.root.after(100, poll)
 
     def _run_all_found_nwb_files(self) -> None:
-        if not self.found_nwb_files:
-            messagebox.showerror(
-                "No NWB files",
-                "No NWB files in memory. Use 'Find NWB files' first.",
-            )
-            return
-
-        self.batch_performance_by_file = {}
-        self.batch_trial_performance_by_file = {}
-        self.batch_trials_by_sound_id = {}
-        self.batch_hit_by_sound = {}
-        hit_source = self.hit_source_var.get()
-        hit_by_sound_func = _get_hit_by_sound_func(hit_source)
-        self._write_output("-----------------------------------\n")
-        self._write_output(
-            f"Running batch performance on {len(self.found_nwb_files)} NWB file(s)...\n"
-        )
-        self._write_output(f"Hit source: {hit_source}\n")
-
-        for nwb_path in self.found_nwb_files:
-            try:
-                data_session_dict = load_session_data_fromFile(nwb_path)
-                single_session_performance = extract_performance(data_session_dict)
-                ir_events, trial_ir_analysis, single_hit_by_sound = analyze_session_responses(
-                    data_session_dict, hit_source)
-                session_key = str(nwb_path)
-                self.batch_performance_by_file[session_key] = single_session_performance
-                results_table = data_session_dict["ResultsTable"]
-                trial_type = np.asarray(results_table["TrialType"], dtype=int)
-                hit = np.asarray(results_table["Hit"], dtype=int)
-                cr = np.asarray(results_table["CR"], dtype=int)
-                correct = np.full(len(results_table), np.nan, dtype=float)
-                correct[trial_type == 1] = hit[trial_type == 1]
-                correct[trial_type == 2] = cr[trial_type == 2]
-                if 'DMTSOutcome' in results_table:
-                    outcome = results_table['DMTSOutcome']
-                    correct = np.where(outcome.isin(['Hit', 'Correct']), 1.,
-                                       np.where(outcome.isin(['Miss', 'FalseAlarm']), 0., np.nan))
-                self.batch_trial_performance_by_file[session_key] = {
-                    "trial_type": trial_type,
-                    "correct": correct,
-                }
-                _append_trials_by_sound_id(
-                    self.batch_trials_by_sound_id,
-                    data_session_dict,
-                    nwb_path,
-                )
-                _merge_hit_by_sound(self.batch_hit_by_sound, single_hit_by_sound)
-                self._write_output(f"OK: {nwb_path.name} -> {single_session_performance}\n")
-            except Exception as exc:
-                self._write_output(f"ERROR: {nwb_path.name} -> {exc}\n")
-
-        self._write_output(
-            f"Batch finished. Stored {len(self.batch_performance_by_file)} performances.\n"
-        )
-        self._write_output("Trials grouped by SoundId across sessions:\n")
-        for sound_id in sorted(self.batch_trials_by_sound_id):
-            n_trials = len(self.batch_trials_by_sound_id[sound_id])
-            self._write_output(f"  Sound {sound_id}: {n_trials} trial(s)\n")
-        self._write_output("Hit by SoundId across sessions:\n")
-        for sound_id in sorted(self.batch_hit_by_sound):
-            stats = self.batch_hit_by_sound[sound_id]
-            self._write_output(
-                f"  Sound {sound_id}: {stats['n_FAs']}/{stats['n_trials']} "
-                f"({stats['FAs_pct']:.2f}%)\n"
-            )
-        self._draw_selected_input_box()
+        self._start_gonogo_animal_batch(tuple(self.found_nwb_files), "nwb")
 
     def _run_all_found_session_folders(self) -> None:
-        if not self.found_session_folders:
-            messagebox.showerror(
-                "No folders",
-                "No session folders in memory. Use 'Find folders' first.",
-            )
-            return
+        self._start_gonogo_animal_batch(tuple(self.found_session_folders), "folder")
 
+    def _start_gonogo_animal_batch(self, paths, kind):
+        if self._gonogo_batch_running or self.nwb_loading:
+            return
+        if not paths:
+            self.status_var.set("No sessions found. Find sessions and select an animal first.")
+            return
+        hit_source = self.hit_source_var.get()
+        if hit_source not in ("IR", "Licks"):
+            self.status_var.set("Choose IR or Licks before running batch analysis.")
+            return
         self.batch_performance_by_file = {}
         self.batch_trial_performance_by_file = {}
         self.batch_trials_by_sound_id = {}
         self.batch_hit_by_sound = {}
         hit_source = self.hit_source_var.get()
-        hit_by_sound_func = _get_hit_by_sound_func(hit_source)
         self._write_output("-----------------------------------\n")
         self._write_output(
-            f"Running batch performance on {len(self.found_session_folders)} session folder(s)...\n"
+            f"Running batch performance on {len(paths)} sessions...\n"
         )
         self._write_output(f"Hit source: {hit_source}\n")
 
-        for session_folder in self.found_session_folders:
-            try:
-                data_session_dict = load_session_data_fromFolder(session_folder)
-                single_session_performance = extract_performance(data_session_dict)
-                ir_events, trial_ir_analysis, single_hit_by_sound = analyze_session_responses(
-                    data_session_dict, hit_source)
-                session_key = str(session_folder)
-                self.batch_performance_by_file[session_key] = single_session_performance
-                results_table = data_session_dict["ResultsTable"]
-                trial_type = np.asarray(results_table["TrialType"], dtype=int)
-                hit = np.asarray(results_table["Hit"], dtype=int)
-                cr = np.asarray(results_table["CR"], dtype=int)
-                correct = np.full(len(results_table), np.nan, dtype=float)
-                correct[trial_type == 1] = hit[trial_type == 1]
-                correct[trial_type == 2] = cr[trial_type == 2]
-                if 'DMTSOutcome' in results_table:
-                    outcome = results_table['DMTSOutcome']
-                    correct = np.where(outcome.isin(['Hit', 'Correct']), 1.,
-                                       np.where(outcome.isin(['Miss', 'FalseAlarm']), 0., np.nan))
-                self.batch_trial_performance_by_file[session_key] = {
-                    "trial_type": trial_type,
-                    "correct": correct,
-                }
-                _append_trials_by_sound_id(
-                    self.batch_trials_by_sound_id,
-                    data_session_dict,
-                    session_folder,
-                )
-                _merge_hit_by_sound(self.batch_hit_by_sound, single_hit_by_sound)
-                self._write_output(f"OK: {session_folder.name} -> {single_session_performance}\n")
-            except Exception as exc:
-                self._write_output(f"ERROR: {session_folder} -> {exc}\n")
+        self._gonogo_batch_running = True
+        self._gonogo_batch_generation += 1
+        generation = self._gonogo_batch_generation
+        self._gonogo_batch_total = len(paths)
+        messages = queue.Queue()
+        self._gonogo_batch_progress = f"Analyzing 0/{len(paths)} files"
+        self.status_var.set(self._gonogo_batch_progress)
+        self._draw_selected_input_box()
 
-        self._write_output(
-            f"Batch finished. Stored {len(self.batch_performance_by_file)} performances.\n"
-        )
+        def worker():
+            batch_performance_by_file = {}
+            batch_trial_performance_by_file = {}
+            batch_trials_by_sound_id = {}
+            batch_hit_by_sound = {}
+            report = lambda text: messages.put(("log", text))
+            errors = []
+            for index, nwb_path in enumerate(paths, 1):
+                if generation != self._gonogo_batch_generation:
+                    return
+                messages.put(("progress", f"Analyzing {index}/{len(paths)} files"))
+                try:
+                    data_session_dict = (load_session_data_fromFile(nwb_path) if kind == "nwb"
+                                         else load_session_data_fromFolder(nwb_path))
+                    single_session_performance = extract_performance(data_session_dict)
+                    single_session_performance["session_start_time"] = session_start_time(data_session_dict)
+                    ir_events, trial_ir_analysis, single_hit_by_sound = analyze_session_responses(
+                        data_session_dict, hit_source)
+                    session_key = str(nwb_path)
+                    results_table = data_session_dict["ResultsTable"]
+                    trial_type = np.asarray(results_table["TrialType"], dtype=int)
+                    hit = np.asarray(results_table["Hit"], dtype=int)
+                    cr = np.asarray(results_table["CR"], dtype=int)
+                    correct = np.full(len(results_table), np.nan, dtype=float)
+                    correct[trial_type == 1] = hit[trial_type == 1]
+                    correct[trial_type == 2] = cr[trial_type == 2]
+                    if 'DMTSOutcome' in results_table:
+                        outcome = results_table['DMTSOutcome']
+                        correct = np.where(outcome.isin(['Hit', 'Correct']), 1.,
+                                           np.where(outcome.isin(['Miss', 'FalseAlarm']), 0., np.nan))
+                    batch_trial_performance_by_file[session_key] = {
+                        "trial_type": trial_type,
+                        "correct": correct,
+                    }
+                    _append_trials_by_sound_id(
+                        batch_trials_by_sound_id,
+                        data_session_dict,
+                        nwb_path,
+                    )
+                    _merge_hit_by_sound(batch_hit_by_sound, single_hit_by_sound)
+                    batch_performance_by_file[session_key] = single_session_performance
+                    report(f"OK: {nwb_path.name} -> {single_session_performance}\n")
+                except Exception as exc:
+                    batch_trial_performance_by_file.pop(str(nwb_path), None)
+                    errors.append({"file": str(nwb_path), "error": str(exc)})
+                    report(f"ERROR: {nwb_path.name} -> {exc}\n")
+
+            messages.put(("done", (batch_performance_by_file,
+                batch_trial_performance_by_file, batch_trials_by_sound_id, batch_hit_by_sound, errors)))
+
+        def poll():
+            if generation != self._gonogo_batch_generation:
+                return
+            for _ in range(100):
+                try:
+                    kind, payload = messages.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "log":
+                    self._write_output(payload)
+                elif kind == "progress":
+                    self._gonogo_batch_progress = payload
+                    self.status_var.set(payload)
+                    self._draw_selected_input_box()
+                elif kind == "done":
+                    (self.batch_performance_by_file, self.batch_trial_performance_by_file,
+                     self.batch_trials_by_sound_id, self.batch_hit_by_sound, self._gonogo_batch_errors) = payload
+                    self._gonogo_batch_running = False
+                    self._finish_gonogo_nwb_batch()
+                    return
+            self.root.after(100, poll)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, poll)
+
+    def _finish_gonogo_nwb_batch(self):
+        self.batch_performance_by_file = ordered_sessions(self.batch_performance_by_file)
+        self.batch_trial_performance_by_file = {
+            key: self.batch_trial_performance_by_file[key]
+            for key in self.batch_performance_by_file
+            if key in self.batch_trial_performance_by_file
+        }
+        summary = batch_complete(len(self.batch_performance_by_file), len(self._gonogo_batch_errors))
+        self._write_output(summary + "\n")
         self._write_output("Trials grouped by SoundId across sessions:\n")
         for sound_id in sorted(self.batch_trials_by_sound_id):
             n_trials = len(self.batch_trials_by_sound_id[sound_id])
@@ -947,6 +1007,7 @@ class ScanMediaFoldersApp:
                 f"  Sound {sound_id}: {stats['n_FAs']}/{stats['n_trials']} "
                 f"({stats['FAs_pct']:.2f}%)\n"
             )
+        self.status_var.set(summary)
         self._draw_selected_input_box()
 
     def _start_scan(self) -> None:
@@ -1002,20 +1063,39 @@ class ScanMediaFoldersApp:
         self._write_output(f"Hit source: {hit_source}\n")
         self._write_output(f"Starting scan for: {selected_path}\n")
 
+        messages = queue.Queue()
+        generation = self.scan_generation
+        def poll():
+            if generation != self.scan_generation:
+                return
+            for _ in range(100):
+                try:
+                    kind, payload = messages.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "progress":
+                    self.status_var.set(payload)
+                else:
+                    callback, args = payload
+                    callback(*args)
+                    return
+            self.root.after(100, poll)
         worker = threading.Thread(
             target=self._run_scan_worker,
-            args=(selected_path, hit_source, self.scan_generation),
+            args=(selected_path, hit_source, messages),
             daemon=True,
         )
         
         worker.start()
+        self.root.after(100, poll)
 
     def _deliver_scan_result(self, generation, callback, *args) -> None:
         if generation == self.scan_generation:
             callback(*args)
 
-    def _run_scan_worker(self, target_path: Path, hit_source: str, generation: int) -> None:
+    def _run_scan_worker(self, target_path: Path, hit_source: str, messages) -> None:
         try:
+            messages.put(("progress", f"Loading session: {target_path.name}"))
             is_valid_folder = target_path.is_dir()
             is_valid_file = target_path.is_file() and target_path.suffix.lower() == ".nwb"
             print('_run_scan_worker', is_valid_folder, is_valid_file)
@@ -1027,26 +1107,18 @@ class ScanMediaFoldersApp:
             else:
                 raise ValueError(f"Unsupported input: {target_path}")
             
+            messages.put(("progress", "Analyzing session responses..."))
             single_session_performance = extract_performance(data_session_dict)
             
             print('extract_performance ok')
             ir_events, trial_ir_analysis, hit_by_sound = analyze_session_responses(
                 data_session_dict, hit_source)
             
-            self.root.after(
-                0,
-                self._deliver_scan_result,
-                generation,
-                self._handle_scan_success,
-                target_path,
-                data_session_dict,
-                single_session_performance,
-                hit_by_sound,
-                ir_events,
-                trial_ir_analysis,
-            )
-        except Exception as exc:  # pragma: no cover - GUI error path
-            self.root.after(0, self._deliver_scan_result, generation, self._handle_scan_error, target_path, exc)
+            messages.put(("done", (self._handle_scan_success, (
+                target_path, data_session_dict, single_session_performance,
+                hit_by_sound, ir_events, trial_ir_analysis))))
+        except Exception as exc:
+            messages.put(("done", (self._handle_scan_error, (target_path, exc))))
 
     def _handle_scan_success(
         self,
@@ -1102,6 +1174,7 @@ class ScanMediaFoldersApp:
         self._write_output(f"Error while scanning {target_folder}: {exc}\n")
         messagebox.showerror("Scan error", f"Could not process folder:\n{target_folder}\n\n{exc}")
         self._finish_scan(target_folder)
+        self.status_var.set(f"Analysis failed: {target_folder.name}")
 
     def _finish_scan(
         self,
@@ -1166,48 +1239,137 @@ class ScanMediaFoldersApp:
             raise ValueError("Missing rolling trial data")
         return payload
 
-    def _load_group_folder(self) -> None:
+    def _load_group_folder(self, *, append=False) -> None:
+        if self.groups_loading:
+            return
         selected = filedialog.askdirectory(
             title="Select a folder containing batch PKL exports",
-            initialdir=str(self.group_folder) if self.group_folder else ".",
-        )
-        if not selected:
+            initialdir=str(self.group_folder) if self.group_folder else ".")
+        if selected:
+            self._start_group_load(folder=Path(selected), append=append)
+
+    def _start_group_load(self, *, folder=None, append=True, manifest=None):
+        """Read files on a worker; only the Tk poller updates widgets/state."""
+        if self.groups_loading:
             return
-        folder = Path(selected)
-        self.group_exports = {}
-        self.group_assignments = {}
-        self.group_name_var.set("")
-        self.group_name_selector.configure(values=())
-        self.group_folder = folder
-        self.group_folder_var.set(str(folder))
-        for item in self.group_file_list.get_children():
-            self.group_file_list.delete(item)
+        existing = dict(self.group_exports) if append else {}
+        current_base = self.group_folder
         self.groups_loading = True
+        self.status_var.set("Groups: loading...")
         self._draw_selected_input_box()
-        self.root.update_idletasks()
-        failures = 0
-        try:
-            paths = sorted(path for path in folder.iterdir()
-                           if path.is_file() and path.suffix.lower() == ".pkl")
-            for path in paths:
+        messages = queue.Queue()
+
+        def worker():
+            try:
+                if manifest is not None:
+                    manifest_path = Path(manifest).resolve()
+                    data = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+                    if not isinstance(data, dict) or data.get("schema_version") != 1 or not isinstance(data.get("assignments"), dict):
+                        raise ValueError("Invalid group assignments file")
+                    mapping = data["assignments"]
+                    if any(value is not None and (not isinstance(value, str) or not value.strip() or value.strip().casefold() == "unassigned") for value in mapping.values()):
+                        raise ValueError("Each assignment must be a group name or null")
+                    saved_base = data.get("base_folder")
+                    if saved_base is not None and (not isinstance(saved_base, str) or not saved_base.strip()):
+                        raise ValueError("Invalid base folder in group assignments")
+                    base = (manifest_path.parent / saved_base if saved_base else current_base or manifest_path.parent).resolve()
+                    paths = [(base / name, group) for name, group in mapping.items()]
+                else:
+                    base = Path(folder).resolve()
+                    paths = [(path, None) for path in sorted(base.iterdir())
+                             if path.is_file() and path.suffix.lower() == ".pkl"]
+                messages.put(("start", base, None))
+                for path, group in paths:
+                    try:
+                        path = path.resolve()
+                        if path.suffix.lower() != ".pkl":
+                            raise ValueError("Expected a PKL file")
+                        key = str(path)
+                        payload = existing.get(key)
+                        is_new = payload is None
+                        if is_new:
+                            payload = self._read_group_export(path)
+                            # Validate everything needed by the table on the worker.
+                            payload["animal_name"]
+                            len(payload["rolling_trial_data"]["trial_index"])
+                            len(payload["performance_by_file"])
+                            existing[key] = payload
+                        messages.put(("file", path, (payload, group, is_new)))
+                    except Exception as exc:
+                        messages.put(("skip", str(path), str(exc)))
+            except Exception as exc:
+                messages.put(("error", None, str(exc)))
+            finally:
+                messages.put(("done", None, None))
+
+        counts = dict(added=0, duplicates=0, applied=0, skipped=0)
+        fatal = False
+
+        def poll():
+            nonlocal fatal
+            finished = False
+            for _ in range(20):
                 try:
-                    payload = self._read_group_export(path)
-                    n_trials = len(payload["rolling_trial_data"]["trial_index"])
-                    n_sessions = len(payload["performance_by_file"])
-                    self.group_exports[str(path)] = payload
-                    self.group_file_list.insert("", "end", iid=str(path), values=(payload["animal_name"], path.name, n_sessions, n_trials, "Unassigned"))
-                    self._write_output(f"Loaded PKL: {path.name} | animal {payload['animal_name']} | {n_sessions} sessions | {n_trials} trials\n")
-                except Exception as exc:
-                    failures += 1
-                    self._write_output(f"Skipped PKL {path.name}: {exc}\n")
-            self.status_var.set(f"Groups: {len(self.group_exports)} PKL files loaded; {failures} skipped")
-            self._write_output(f"Groups folder: {folder} | {len(self.group_exports)} files loaded; {failures} skipped.\n")
-        except OSError as exc:
-            self.status_var.set("Groups folder could not be read")
-            messagebox.showerror("Folder load failed", str(exc), parent=self.root)
-        finally:
-            self.groups_loading = False
-            self._draw_selected_input_box()
+                    kind, path, value = messages.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "start":
+                    if not append:
+                        self.group_exports = {}
+                        self.group_assignments = {}
+                        self.group_name_var.set("")
+                        self.group_name_selector.configure(values=())
+                        self.group_folders = []
+                        self.group_file_list.delete(*self.group_file_list.get_children())
+                    if not append or self.group_folder is None:
+                        self.group_folder = path
+                    if manifest is None and path not in self.group_folders:
+                        self.group_folders.append(path)
+                elif kind == "file":
+                    payload, group, is_new = value
+                    key = str(path)
+                    if key not in self.group_exports:
+                        self.group_file_list.insert("", "end", iid=key,
+                            values=(payload["animal_name"], path.name, len(payload["performance_by_file"]),
+                                    len(payload["rolling_trial_data"]["trial_index"]), "Unassigned"))
+                        self.group_exports[key] = payload
+                        counts["added"] += 1
+                    else:
+                        counts["duplicates"] += 1
+                    if path.parent not in self.group_folders:
+                        self.group_folders.append(path.parent)
+                    if manifest is not None:
+                        if group is None:
+                            self.group_assignments.pop(key, None)
+                        else:
+                            self.group_assignments[key] = group.strip()
+                            counts["applied"] += 1
+                elif kind == "skip":
+                    counts["skipped"] += 1
+                    self._write_output(f"Skipped PKL {path}: {value}\n")
+                elif kind == "error":
+                    fatal = True
+                    self._write_output(f"Groups load failed: {value}\n")
+                    messagebox.showerror("Groups load failed", value, parent=self.root)
+                elif kind == "done":
+                    finished = True
+                    break
+            if finished:
+                self.groups_loading = False
+                self.group_folder_var.set("\n".join(map(str, self.group_folders)) or "No folder selected")
+                summary = ("Groups load failed. " if fatal else "Groups: ") + (
+                    f"{len(self.group_exports)} PKL files loaded; {counts['added']} added; "
+                    f"{counts['duplicates']} already listed; {counts['applied']} assignments applied; "
+                    f"{counts['skipped']} skipped.")
+                self.status_var.set(summary)
+                self._write_output(summary + "\n")
+                self._refresh_group_assignments()
+            else:
+                self.status_var.set(f"Groups: loading... {counts['added']} added; {counts['skipped']} skipped")
+                self.root.after(50, poll)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(50, poll)
 
     def _refresh_group_assignments(self):
         for key in self.group_exports:
@@ -1216,6 +1378,8 @@ class ScanMediaFoldersApp:
         self._draw_selected_input_box()
 
     def _assign_selected_group(self):
+        if self.groups_loading:
+            return
         selection = self.group_file_list.selection()
         name = self.group_name_var.get().strip()
         if not selection or not name or name.casefold() == "unassigned":
@@ -1229,11 +1393,21 @@ class ScanMediaFoldersApp:
         self._write_output(f"Assigned {len(selection)} PKL file(s) to {name}. Save group assignments to keep these changes.\n")
 
     def _remove_selected_group(self):
+        if self.groups_loading:
+            return
         for key in self.group_file_list.selection():
             self.group_assignments.pop(key, None)
         self._refresh_group_assignments()
 
+    def _group_assignment_file_key(self, key):
+        path = Path(key)
+        if path.is_relative_to(self.group_folder):
+            return path.relative_to(self.group_folder).as_posix()
+        return path.as_posix()
+
     def _save_group_assignments(self):
+        if self.groups_loading:
+            return
         if self.group_folder is None or not self.group_exports:
             messagebox.showinfo("Groups", "Load a PKL folder first.", parent=self.root)
             return
@@ -1243,8 +1417,8 @@ class ScanMediaFoldersApp:
         if not filename:
             return
         try:
-            data = {"schema_version": 1, "assignments": {
-                Path(key).relative_to(self.group_folder).as_posix(): self.group_assignments.get(key)
+            data = {"schema_version": 1, "base_folder": str(self.group_folder), "assignments": {
+                self._group_assignment_file_key(key): self.group_assignments.get(key)
                 for key in self.group_exports}}
             Path(filename).write_text(json.dumps(data, indent=2), encoding="utf-8")
         except (OSError, ValueError) as exc:
@@ -1253,28 +1427,13 @@ class ScanMediaFoldersApp:
         self._write_output(f"Saved group assignments: {filename}\n")
 
     def _load_group_assignments(self):
-        if self.group_folder is None or not self.group_exports:
-            messagebox.showinfo("Groups", "Load a PKL folder first.", parent=self.root)
+        if self.groups_loading:
             return
         filename = filedialog.askopenfilename(parent=self.root, title="Load group assignments",
-            initialdir=str(self.group_folder), filetypes=[("JSON files", "*.json")])
-        if not filename:
-            return
-        try:
-            data = json.loads(Path(filename).read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or data.get("schema_version") != 1 or not isinstance(data.get("assignments"), dict):
-                raise ValueError("Invalid group assignments file")
-            mapping = data["assignments"]
-            if any(value is not None and (not isinstance(value, str) or not value.strip() or value.casefold() == "unassigned") for value in mapping.values()):
-                raise ValueError("Each assignment must be a group name or null")
-            known = {Path(key).relative_to(self.group_folder).as_posix(): key for key in self.group_exports}
-            loaded = {known[name]: group.strip() for name, group in mapping.items() if name in known and group is not None}
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("Load failed", str(exc), parent=self.root)
-            return
-        self.group_assignments = loaded
-        self._refresh_group_assignments()
-        self._write_output(f"Loaded {len(loaded)} assignments; {len(set(mapping) - set(known))} file(s) absent from this folder.\n")
+            initialdir=str(self.group_folder) if self.group_folder else ".",
+            filetypes=[("JSON files", "*.json")])
+        if filename:
+            self._start_group_load(manifest=Path(filename))
 
     def _open_group_average_plot(self):
         try:
@@ -1287,6 +1446,114 @@ class ScanMediaFoldersApp:
             self._write_output("Opened group averages: grey individual animals, colored group means; aligned by cumulative trial index. Multiple exports per animal are averaged first.\n")
         except (ValueError, KeyError, TypeError) as exc:
             messagebox.showerror("Group plot unavailable", str(exc), parent=self.root)
+
+    def _open_single_animal_curves(self):
+        if self.groups_loading:
+            return
+        try:
+            from group_learning import plot_group_learning_thresholds
+            figures, results, stats = plot_group_learning_thresholds(
+                self.group_exports, self.group_assignments)
+        except (ValueError, KeyError, TypeError, RuntimeError) as exc:
+            messagebox.showerror("Single animal plot unavailable", str(exc), parent=self.root)
+            return
+        self.group_learning_figures = figures
+        self.diffgroups_batch_hit_by_sound = results
+        self.group_learning_stats = stats
+        for group, stat in stats.items():
+            self._write_output(f"{group}: n={stat['n']}, mean={stat['mean']:.1f}, SEM={stat['sem']:.1f}\n")
+        self._write_output("Sigmoid threshold: 80%; 25-trial bins; curves cropped at threshold. "
+                           "Only finite estimates enter the group mean and SEM.\n")
+        plt.show(block=False)
+
+    def _load_group_trial_data(self):
+        if self._group_trial_data_loading:
+            return
+        sources = self.preferences.get("group_trial_data_sources", [])
+        if not isinstance(sources, list) or not sources:
+            filenames = filedialog.askopenfilenames(parent=self.root, title="Load group animal/session data",
+                                                     filetypes=[("All files", "*.*")])
+            if not filenames:
+                return
+            sources = [{"group": Path(name).stem, "path": name} for name in filenames]
+        sources = list(sources)
+        self._group_trial_data_loading = True
+        self._draw_selected_input_box()
+        messages = queue.Queue()
+
+        def worker():
+            for source in sources:
+                try:
+                    if not isinstance(source, dict) or not isinstance(source.get("group"), str) or not source["group"].strip():
+                        raise ValueError("Each source needs a group label and file path")
+                    group = source["group"].strip()
+                    path = Path(source["path"])
+                    with path.open("rb") as stream:
+                        payload = pickle.load(stream)
+                    if not isinstance(payload, dict) or not payload:
+                        raise ValueError("Expected a non-empty animal dictionary")
+                    if not all(isinstance(value, dict) and isinstance(value.get("sessions"), list) for value in payload.values()):
+                        raise ValueError("Expected animal dictionaries with a sessions list")
+                    messages.put(("loaded", group, payload))
+                except Exception as exc:
+                    messages.put(("error", str(source), str(exc)))
+            messages.put(("done", None, None))
+
+        loaded = {}
+        errors = []
+        def poll():
+            finished = False
+            for _ in range(20):
+                try:
+                    kind, group, payload = messages.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "loaded":
+                    if group in loaded:
+                        errors.append(f"Duplicate group label: {group}")
+                    else:
+                        loaded[group] = payload
+                        self._write_output(f"Loaded group trial data: {group} | {len(payload)} animals\n")
+                elif kind == "error":
+                    errors.append(f"{group}: {payload}")
+                else:
+                    finished = True
+                    break
+            if finished:
+                self._group_trial_data_loading = False
+                # A failed reload must not discard previously loaded data.
+                if loaded:
+                    self.group_trial_data = loaded
+                for error in errors:
+                    self._write_output(f"Group trial data skipped: {error}\n")
+                self.status_var.set(f"Group trial data: {len(loaded)} groups loaded; {len(errors)} skipped")
+                self._draw_selected_input_box()
+                if errors:
+                    messagebox.showwarning("Group trial data", "\n".join(errors), parent=self.root)
+            else:
+                self.root.after(50, poll)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(50, poll)
+
+    def _plot_first_session_fork_durations(self):
+        if self._group_trial_data_loading or not self.group_trial_data:
+            return
+        try:
+            from group_fork_duration import plot_first_session_fork_durations
+            figures, distributions, skipped = plot_first_session_fork_durations(self.group_trial_data)
+        except (ValueError, TypeError, KeyError) as exc:
+            messagebox.showerror("Fork duration plot unavailable", str(exc), parent=self.root)
+            return
+        self.group_fork_duration_figures = figures
+        self.group_fork_duration_distributions = distributions
+        for (group, animal, session_label), record in distributions.items():
+            self._write_output(f"{session_label}: {group} / {animal}: {len(record['values'])} fork durations; {record['excluded']} invalid duration/unknown-type rows excluded.\n")
+            for kind, mean in record["means"].items():
+                self._write_output(f"  {kind}: mean={mean:.1f} ms; n={len(record['by_trial_type'][kind])}\n")
+        for warning in skipped:
+            self._write_output(f"Fork duration skipped: {warning}\n")
+        plt.show(block=False)
 
     def _draw_canvas_connections(self, ax=None):
         """Connect visible rectangles using the preference-defined action IDs."""
@@ -1336,35 +1603,21 @@ class ScanMediaFoldersApp:
         ax.clear()
         ax.axis("off")
         if self.groups_loading:
-            text = "Loading ..."
-        elif self.group_exports:
-            summary = {}
-            for key, payload in self.group_exports.items():
-                group = self.group_assignments.get(key, "Unassigned")
-                row = summary.setdefault(group, {"files": 0, "animals": set()})
-                row["files"] += 1
-                animal = str(payload.get("animal_name", "")).strip()
-                if animal:
-                    row["animals"].add(animal.casefold())
-            rows = [[group, item["files"], len(item["animals"])] for group, item in sorted(summary.items())]
-            table = ax.table(cellText=rows, colLabels=["Group", "PKL files", "Unique animals"],
-                             bbox=[0.10, 0.90 - min(0.40, 0.065 * (len(rows) + 1)),
-                                   0.80, min(0.40, 0.065 * (len(rows) + 1))], cellLoc="center")
-            table.auto_set_font_size(False)
-            for cell in table.get_celld().values():
-                cell.get_text().set(**self.fonts.mpl("canvas_table"))
-            ax.set_title("Group assignments", loc="left")
-            if self.group_assignments:
-                self._canvas_button(16, min(300, max(16, ax.bbox.height - 60)), "Plot group\naverages", "plot_group_averages",
-                                    "#F3FAF1", "#59A14F", ax=ax, grid=False)
-            self._draw_canvas_connections()
-            self.main_canvas.draw()
-            return
-        else:
-            text = "Select a folder containing batch PKL exports."
-        ax.text(0.5, 0.5, text, ha="center", va="center", **self.fonts.mpl("canvas_message"), transform=ax.transAxes, wrap=True)
+            self._canvas_button(16, 16, "Loading...", "groups_loading",
+                                "#EEEEEE", "#AAAAAA", enabled=False, ax=ax)
+        elif self.group_exports and self.group_assignments:
+            self._canvas_button(16, 16, "Plot Curves\nSingle Animals", "plot_single_animal_curves",
+                                "#F3FAF1", "#59A14F", ax=ax)
+            self._canvas_button(182, 16, "Plot Group\nAverages", "plot_group_averages",
+                                "#F3FAF1", "#59A14F", ax=ax)
+        busy = self._group_trial_data_loading
+        self._canvas_button(16, 82, "Loading..." if busy else "Load group\ntrial data", "load_group_trial_data",
+                            "#EEEEEE" if busy else "#F3FAF1", "#AAAAAA" if busy else "#59A14F", enabled=not busy, ax=ax)
+        if self.group_trial_data:
+            self._canvas_button(182, 82, "First / last session\nfork duration", "plot_first_session_fork_duration",
+                                "#EEEEEE" if busy else "#F3FAF1", "#AAAAAA" if busy else "#59A14F", enabled=not busy, ax=ax)
         self._draw_canvas_connections()
-        self.main_canvas.draw()
+        self.main_canvas.draw_idle()
 
     def _draw_animal_canvas(self) -> None:
         ax = self.main_canvas_ax
@@ -1372,23 +1625,16 @@ class ScanMediaFoldersApp:
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.axis("off")
-        if self.nwb_loading:
-            ax.text(0.5, 0.5, "Loading ...", ha="center", va="center",
-                    **self.fonts.mpl("canvas_loading"), transform=ax.transAxes)
-            self._draw_canvas_connections()
-            self.main_canvas.draw()
-            return
         files = self.found_nwb_files
         folders = self.found_session_folders
-        if not files and not folders:
-            ax.text(0.06, 0.88, "Select an animal from Detected animal to begin." if self.nwb_groups else "Find sessions and select an animal to begin.",
-                    transform=ax.transAxes, **self.fonts.mpl("canvas_hint"), wrap=True)
-        else:
-            label = "Run All NWB Files" if files else "Run All Folders"
+        if files or folders:
+            busy = self._gonogo_batch_running
             action = "run_all_nwb" if files else "run_all_folders"
-            label = "Run all NWB\nfiles" if files else "Run all\nfolders"
-            self._canvas_button(16, 16, label, action, "#F3FAF1", "#59A14F")
-            if self.batch_performance_by_file:
+            label = "Running..." if busy else "Run all NWB\nfiles" if files else "Run all\nfolders"
+            self._canvas_button(16, 16, label, action,
+                                "#EEEEEE" if busy else "#F3FAF1",
+                                "#AAAAAA" if busy else "#59A14F", enabled=not busy)
+            if self.batch_performance_by_file and not busy:
                 self._canvas_button(182, 16, "Plot Batch\nPerformance", "plot_batch_session_performance",
                                     "#F3FAF1", "#59A14F")
                 self._canvas_button(16, 82, "Export batch\ndata (.pkl)", "export_batch_data",
@@ -1455,12 +1701,20 @@ class ScanMediaFoldersApp:
         self.main_canvas.draw()
 
     def _handle_main_canvas_pick(self, event) -> None:
+        if event.artist.get_gid() == "load_group_trial_data":
+            self._load_group_trial_data()
+            return
+        if event.artist.get_gid() == "plot_first_session_fork_duration":
+            self._plot_first_session_fork_durations()
+            return
         if event.artist.get_gid() == "run_all_nwb":
             self._run_all_found_nwb_files()
         elif event.artist.get_gid() == "run_all_folders":
             self._run_all_found_session_folders()
         elif event.artist.get_gid() == "plot_group_averages":
             self._open_group_average_plot()
+        elif event.artist.get_gid() == "plot_single_animal_curves":
+            self._open_single_animal_curves()
         elif event.artist.get_gid() == "export_batch_data":
             self._export_batch_data()
         elif event.artist.get_gid() == "run_session":
@@ -1609,7 +1863,7 @@ class ScanMediaFoldersApp:
         self._write_output("Opened hit by sound plot.\n")
 
     def _export_batch_data(self) -> None:
-        if not self.batch_performance_by_file:
+        if self._gonogo_batch_running or self.nwb_loading or not self.batch_performance_by_file:
             return
         filename = filedialog.asksaveasfilename(
             parent=self.root, title="Export batch analysis",
@@ -1639,6 +1893,8 @@ class ScanMediaFoldersApp:
         self._write_output(f"Exported batch data and 25-trial rolling averages to: {filename}\n")
 
     def _open_batch_session_performance_plot(self) -> None:
+        if self._gonogo_batch_running or self.nwb_loading:
+            return
         if not self.batch_performance_by_file:
             messagebox.showinfo(
                 "No batch data",

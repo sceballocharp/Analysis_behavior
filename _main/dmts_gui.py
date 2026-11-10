@@ -1,5 +1,6 @@
 """DMTS controls, session viewers, and batch analysis for the behavior GUI."""
 from pathlib import Path
+from animal_work import scan_sessions, discovery_status, discovery_complete, batch_complete
 import os
 import json
 import pickle
@@ -70,6 +71,8 @@ class DmtsPanel:
         self._dmts_loaded_signals = None
         self._dmts_file_actions = set()
         self._dmts_file_busy = False
+        self._dmts_file_generation = 0
+        self.dmts_file_status_var = tk.StringVar(value="Choose an NWB file")
         self._dmts_export_ready = False
         self.dmts_example_var = tk.StringVar(value="")
         self.dmts_viewer_window = None
@@ -147,8 +150,10 @@ class DmtsPanel:
         self._dmts_folder_scan_poll = None
         input_buttons = ttk.Frame(dmts_animal_tab)
         input_buttons.pack(fill="x")
-        ttk.Button(input_buttons, text="Select mouse folder", command=self._browse_dmts_mouse_folder).pack(side="left")
-        ttk.Button(input_buttons, text="Load PKL", command=self._load_dmts_batch).pack(side="left", padx=(6, 0))
+        self.dmts_mouse_folder_button = ttk.Button(input_buttons, text="Select mouse folder", command=self._browse_dmts_mouse_folder)
+        self.dmts_mouse_folder_button.pack(side="left")
+        self.dmts_load_batch_button = ttk.Button(input_buttons, text="Load PKL", command=self._load_dmts_batch)
+        self.dmts_load_batch_button.pack(side="left", padx=(6, 0))
         ttk.Label(dmts_animal_tab, textvariable=self.dmts_mouse_folder_var, wraplength=300).pack(
             anchor="w", pady=(6, 8))
         ttk.Label(dmts_animal_tab, textvariable=self.dmts_scan_status_var, wraplength=300).pack(anchor="w")
@@ -420,6 +425,7 @@ class DmtsPanel:
         self.dmts_file_inner_notebook.add(dmts_plot_settings, text="Plot settings")
         ttk.Label(dmts_file_main, text="Session input:").pack(anchor="w")
         ttk.Button(dmts_file_main, text="Browse NWB", command=self._browse_dmts_nwb).pack(fill="x", pady=(6, 0))
+        ttk.Label(dmts_file_main, textvariable=self.dmts_file_status_var, wraplength=300).pack(anchor="w", pady=(6, 0))
         ttk.Label(dmts_file_main, text="Examples:").pack(anchor="w", pady=(6, 0))
         examples = ttk.Combobox(dmts_file_main, textvariable=self.dmts_example_var,
                                values=("", "Pretraining recording", "MatchOnly recording"), state="readonly")
@@ -474,6 +480,11 @@ class DmtsPanel:
             ttk.Label(match_settings, text=label).grid(row=row, column=0, sticky="w", pady=2)
             ttk.Entry(match_settings, textvariable=self.matchonly_vars[key], width=10).grid(
                 row=row, column=1, sticky="ew", padx=(8, 0), pady=2)
+        self.normalize_lick_histogram_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            match_settings, text="Normalize histogram (% of licks per side/type)",
+            variable=self.normalize_lick_histogram_var,
+        ).grid(row=len(self.matchonly_vars), column=0, columnspan=2, sticky="w", pady=4)
         match_settings.columnconfigure(1, weight=1)
         heatmap_settings = ttk.LabelFrame(dmts_plot_settings, text="Voltage heatmap settings", padding=10)
         heatmap_settings.pack(fill="x", pady=(12, 0))
@@ -682,6 +693,8 @@ class DmtsPanel:
         generation = self._dmts_batch_generation
         paths = sorted(self.dmts_animal_nwb_files, key=lambda p: str(p).casefold())
         messages = queue.Queue()
+        self.dmts_scan_status_var.set(f"Analyzing 0/{len(paths)} files")
+        self._refresh_dmts_animal_controls()
         self._draw_dmts_canvas()
         self._write_dmts_animal_output("\nBatch: saved outcomes; plots and exports ordered by NWB session_start_time.\n")
 
@@ -690,12 +703,12 @@ class DmtsPanel:
             for index, path in enumerate(paths, 1):
                 if generation != self._dmts_batch_generation:
                     return
+                messages.put(("progress", index))
                 try:
                     result = summarize_session(load_session_data_fromFile(path), path, silent_match_threshold=silent_match_threshold)
                     messages.put(("result", result))
                 except Exception as exc:
                     messages.put(("error", {"file": str(path), "error": str(exc)}))
-                messages.put(("progress", index))
             messages.put(("done", None))
 
         def poll():
@@ -734,9 +747,10 @@ class DmtsPanel:
                     self._dmts_batch_running = False
                     from dmts_batch import session_sort_key
                     self.dmts_batch_results.sort(key=session_sort_key)
-                    summary = f"Batch complete: {len(self.dmts_batch_results)} sessions; {len(self.dmts_batch_errors)} skipped."
+                    summary = batch_complete(len(self.dmts_batch_results), len(self.dmts_batch_errors))
                     self.dmts_scan_status_var.set(summary)
                     self._write_dmts_animal_output(summary + "\n")
+                    self._refresh_dmts_animal_controls()
                     self._draw_dmts_canvas()
                     break
             if not finished:
@@ -754,6 +768,8 @@ class DmtsPanel:
 
 
     def _load_dmts_batch(self):
+        if self._dmts_batch_running or self._dmts_folder_scan_poll is not None:
+            return
         filename = filedialog.askopenfilename(parent=self.root, title="Load saved DMTS batch data",
                                               filetypes=[("DMTS batch data", "*.pkl")])
         if not filename:
@@ -789,6 +805,7 @@ class DmtsPanel:
         self.dmts_show_engaged_var.set(False)
         self.dmts_scan_status_var.set(f"Loaded {len(sessions)} sessions from PKL")
         self._write_dmts_animal_output(f"Loaded DMTS batch data: {filename}\n{len(sessions)} sessions ready for plotting.\n")
+        self._refresh_dmts_animal_controls()
         self._draw_dmts_canvas()
 
     def _save_dmts_batch(self):
@@ -1005,7 +1022,8 @@ class DmtsPanel:
             from dmts_matchonly import plot_matchonly
             session = self._dmts_session
             figure, self.lick_events, self.lick_histogram, self.trial_order = plot_matchonly(
-                session, file_path=filename, **settings)
+                session, file_path=filename,
+                normalize_histogram=self.normalize_lick_histogram_var.get(), **settings)
         except Exception as exc:
             messagebox.showerror("MatchOnly analysis failed", str(exc), parent=self.root)
             return
@@ -1135,6 +1153,14 @@ class DmtsPanel:
         window.protocol("WM_DELETE_WINDOW", close)
 
 
+    def _refresh_dmts_animal_controls(self):
+        scanning = self._dmts_folder_scan_poll is not None
+        self.dmts_mouse_folder_button.configure(
+            text="Running..." if scanning else "Select mouse folder",
+            state="disabled" if scanning else "normal")
+        self.dmts_load_batch_button.configure(
+            state="disabled" if scanning or self._dmts_batch_running else "normal")
+
     def _browse_dmts_mouse_folder(self) -> None:
         previous = self.dmts_mouse_folder_var.get()
         folder = filedialog.askdirectory(parent=self.root, title="Select mouse folder",
@@ -1163,25 +1189,8 @@ class DmtsPanel:
         self.dmts_animal_output.insert("end", f"Searching: {folder}\n\n")
         self.dmts_animal_output.configure(state="disabled")
 
-        def worker():
-            count = 0
-            def warning(exc):
-                results.put(("warning", f"Cannot read {exc.filename}: {exc.strerror}"))
-            try:
-                for directory, dirs, files in os.walk(folder, onerror=warning, followlinks=False):
-                    if cancel.is_set():
-                        return
-                    dirs.sort(key=str.casefold)
-                    paths = [Path(directory) / name for name in sorted(files, key=str.casefold)
-                             if Path(name).suffix.lower() == ".nwb"]
-                    count += 1
-                    results.put(("progress", (count, paths)))
-            except Exception as exc:
-                results.put(("warning", str(exc)))
-            finally:
-                results.put(("done", None))
-
         warnings = 0
+        errors = []
         def poll():
             nonlocal warnings
             if cancel.is_set():
@@ -1199,26 +1208,30 @@ class DmtsPanel:
                     for path in paths:
                         self.dmts_animal_output.insert("end", str(path.relative_to(folder)) + "\n")
                     self.dmts_scan_status_var.set(
-                        f"Scanning: {directories} folders; {len(self.dmts_animal_nwb_files)} NWB files")
+                        discovery_status(directories, len(self.dmts_animal_nwb_files), "nwb"))
                 elif kind == "warning":
                     warnings += 1
                     self.dmts_animal_output.insert("end", f"Warning: {payload}\n")
+                elif kind == "error":
+                    errors.append(payload)
+                    self.dmts_animal_output.insert("end", f"Error: {payload}\n")
                 else:
                     finished = True
                     total = len(self.dmts_animal_nwb_files)
-                    summary = f"Found {total} NWB file(s)." if total else "No NWB files found."
-                    if warnings:
-                        summary += f" {warnings} warning(s); search may be incomplete."
+                    summary = ("Search failed: " + errors[-1] if errors
+                               else discovery_complete(total, "nwb", warnings))
                     self.dmts_scan_status_var.set(summary)
                     self.dmts_animal_output.insert("end", "\n" + summary + "\n")
                     break
             self.dmts_animal_output.configure(state="disabled")
             self._dmts_folder_scan_poll = None if finished else self.root.after(100, poll)
             if finished:
+                self._refresh_dmts_animal_controls()
                 self._draw_dmts_canvas()
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=scan_sessions, args=(folder, "nwb", "", cancel, results), daemon=True).start()
         self._dmts_folder_scan_poll = self.root.after(100, poll)
+        self._refresh_dmts_animal_controls()
         self._draw_dmts_canvas()
 
 
@@ -1232,10 +1245,14 @@ class DmtsPanel:
         if filename:
             self.dmts_example_var.set("")
             self._select_dmts_file(filename)
+            self._load_dmts_file()
 
 
     def _select_dmts_example(self, _event=None):
         if not self.dmts_example_var.get():
+            self._dmts_file_generation += 1
+            self._dmts_file_busy = False
+            self.dmts_file_status_var.set("Choose an NWB file")
             if self.dmts_viewer_window is not None and self.dmts_viewer_window.winfo_exists():
                 self.dmts_viewer_window.event_generate("<<CloseDMTSViewer>>")
             self._dmts_loaded = False
@@ -1261,59 +1278,72 @@ class DmtsPanel:
         if self._dmts_file_busy or not self.dmts_file_var.get():
             return
         filename = self.dmts_file_var.get()
-        actions = set(self._dmts_file_actions)
+        generation = self._dmts_file_generation
+        example = self.dmts_example_var.get()
         self._write_dmts_file_output(f"Loading NWB: {filename}")
         self._dmts_loaded = False
         self._dmts_export_ready = False
         self.dmts_trial_viewer_button.configure(state="disabled")
         self._dmts_file_busy = True
+        self.dmts_file_status_var.set("Reading NWB metadata...")
         self._draw_dmts_canvas()
         messages = queue.Queue()
         def worker():
             try:
+                actions = self._read_dmts_file_actions(filename)
+                if example == "Pretraining recording":
+                    actions.intersection_update({"dmts_pretraining", "dmts_trial_examples"})
                 if not actions:
                     raise ValueError("No supported DMTS signals or trial data found. Select another NWB file.")
+                messages.put(("progress", "Loading session and analyzing trials..."))
                 session = load_session_data_fromFile(Path(filename)) if actions & {"dmts_matchonly", "dmts_summary", "dmts_trial_examples"} else None
                 signals = None
                 if "dmts_pretraining" in actions:
+                    messages.put(("progress", "Loading lick and reward signals..."))
                     import h5py
                     from dmts_pretraining import _read_signal
                     with h5py.File(filename, "r") as handle:
                         signals = {name: _read_signal(handle["acquisition"], name)
                                    for name in ("Reward", "LeftLick", "RightLick")}
-                messages.put((session, signals, None))
+                messages.put(("done", (session, signals, actions, None)))
             except Exception as exc:
-                messages.put((None, None, str(exc)))
+                messages.put(("done", (None, None, set(), str(exc))))
         def poll():
-            try:
-                session, signals, error = messages.get_nowait()
-            except queue.Empty:
-                self.root.after(100, poll)
+            if generation != self._dmts_file_generation:
                 return
-            self._dmts_file_busy = False
-            if filename != self.dmts_file_var.get() or actions != self._dmts_file_actions:
+            for _ in range(100):
+                try:
+                    kind, payload = messages.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "progress":
+                    self.dmts_file_status_var.set(payload)
+                    continue
+                session, signals, actions, error = payload
+                self._dmts_file_busy = False
+                if error:
+                    self.dmts_file_status_var.set("NWB loading failed")
+                    self._write_dmts_file_output(f"Loading failed: {error}")
+                    messagebox.showerror("NWB loading failed", error, parent=self.root)
+                else:
+                    self._dmts_file_actions = actions
+                    self._dmts_session = session
+                    self._dmts_loaded_signals = signals
+                    self._dmts_loaded = True
+                    self.dmts_file_status_var.set(f"Done: {Path(filename).name}")
+                    self._write_dmts_file_output(f"Loaded NWB: {filename}")
+                    self.dmts_trial_viewer_button.configure(state="normal" if session is not None else "disabled")
                 self._draw_dmts_canvas()
-                # An example selected during loading must start after the old load ends.
-                example_file = {"Pretraining recording": DEFAULT_DMTS_FILE,
-                                "MatchOnly recording": DEFAULT_DMTS_MATCHONLY_FILE}.get(self.dmts_example_var.get())
-                if example_file and self.dmts_file_var.get() == example_file:
-                    self._load_dmts_file()
                 return
-            if error:
-                self._write_dmts_file_output(f"Loading failed: {error}")
-                messagebox.showerror("NWB loading failed", error, parent=self.root)
-            else:
-                self._dmts_session = session
-                self._dmts_loaded_signals = signals
-                self._dmts_loaded = True
-                self._write_dmts_file_output(f"Loaded NWB: {filename}")
-                self.dmts_trial_viewer_button.configure(state="normal" if session is not None else "disabled")
-            self._draw_dmts_canvas()
+            self.root.after(100, poll)
         threading.Thread(target=worker, daemon=True).start()
         self.root.after(100, poll)
 
 
     def _select_dmts_file(self, filename):
+        self._dmts_file_generation += 1
+        self._dmts_file_busy = False
+        self.dmts_file_status_var.set("Selected NWB file")
         if self.dmts_viewer_window is not None and self.dmts_viewer_window.winfo_exists():
             self.dmts_viewer_window.event_generate("<<CloseDMTSViewer>>")
         self.dmts_file_var.set(filename)
@@ -1327,22 +1357,25 @@ class DmtsPanel:
         for name in ("lick_events", "lick_histogram", "trial_order", "left_lick_times", "right_lick_times"):
             if hasattr(self, name):
                 delattr(self, name)
-        try:
-            import h5py
-            with h5py.File(filename, "r") as handle:
-                if all(f"acquisition/{name}/data" in handle for name in ("LeftLick", "RightLick", "Reward")):
-                    self._dmts_file_actions.add("dmts_pretraining")
-                trials = handle.get("intervals/trials")
-                if trials is not None and all(name in trials for name in ("sample_sound_ids", "test_sound_ids", "HMCF")):
-                    self._dmts_file_actions.add("dmts_summary")
-                    self._dmts_file_actions.add("dmts_sound_performance")
-                    self._dmts_file_actions.add("dmts_modality_performance")
-                    if all(f"acquisition/{name}/data" in handle for name in ("LeftLick", "RightLick")):
-                        self._dmts_file_actions.add("dmts_matchonly")
-                        self._dmts_file_actions.add("dmts_trial_examples")
-        except Exception as exc:
-            messagebox.showerror("Unable to read NWB file", str(exc), parent=self.root)
         self._draw_dmts_canvas()
+
+
+    @staticmethod
+    def _read_dmts_file_actions(filename):
+        actions = set()
+        import h5py
+        with h5py.File(filename, "r") as handle:
+            if all(f"acquisition/{name}/data" in handle for name in ("LeftLick", "RightLick", "Reward")):
+                actions.add("dmts_pretraining")
+            trials = handle.get("intervals/trials")
+            if trials is not None and all(name in trials for name in ("sample_sound_ids", "test_sound_ids", "HMCF")):
+                actions.add("dmts_summary")
+                actions.add("dmts_sound_performance")
+                actions.add("dmts_modality_performance")
+                if all(f"acquisition/{name}/data" in handle for name in ("LeftLick", "RightLick")):
+                    actions.add("dmts_matchonly")
+                    actions.add("dmts_trial_examples")
+        return actions
 
 
     def _update_dmts_voltage_button(self):

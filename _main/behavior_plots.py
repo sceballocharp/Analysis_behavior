@@ -8,6 +8,7 @@ These functions are intentionally GUI-agnostic so they can be reused by:
 """
 
 from pathlib import Path
+from session_order import session_sort_key
 import re
 
 import numpy as np
@@ -266,7 +267,7 @@ def batch_rolling_trial_data(performance_by_file, trial_performance_by_file, win
         raise ValueError("window must be a positive integer")
     session_keys, local_indices, types, correct = [], [], [], []
     for key, performance in sorted(performance_by_file.items(),
-            key=lambda item: _natural_sort_key(Path(item[0]).stem or str(item[0]))):
+            key=session_sort_key):
         if not isinstance(performance, dict) or "error" in performance:
             continue
         data = (trial_performance_by_file or {}).get(key, {})
@@ -347,7 +348,7 @@ def _mean_aligned_curves(curves):
     return np.divide(sums, counts, out=np.full(length, np.nan), where=counts > 0)
 
 
-def plot_group_average_performance(exports, assignments, plot_layout=None, show=True, block=False):
+def plot_group_average_performance(exports, assignments, plot_layout=None, show=True, block=False, individual_only=False):
     groups = group_animal_curves(exports, assignments)
     if not groups:
         return None
@@ -372,6 +373,13 @@ def plot_group_average_performance(exports, assignments, plot_layout=None, show=
         individual_label = True
         for index, (group, animals) in enumerate(sorted(groups.items())):
             curves = [animal[metric] for animal in animals.values()]
+            if individual_only:
+                offset = sum(len(items) for _, items in sorted(groups.items())[:index])
+                for animal_index, (animal, animal_curves) in enumerate(sorted(animals.items())):
+                    curve = animal_curves[metric]
+                    ax.plot(np.arange(len(curve)), curve, color=colors((offset + animal_index) % 10),
+                            lw=1.4, label=f"{animal} ({group})")
+                continue
             for curve in curves:
                 ax.plot(np.arange(len(curve)), curve, color="0.65", lw=0.7, alpha=0.6,
                         label="Individual animals" if individual_label else "_nolegend_", zorder=1)
@@ -387,7 +395,8 @@ def plot_group_average_performance(exports, assignments, plot_layout=None, show=
         ax.legend(frameon=False, fontsize=8)
     ax_go.tick_params(axis="x", labelbottom=False)
     ax_nogo.set_xlabel("Cumulative trial index (0-based)")
-    ax_total.set_xlabel("Cumulative trial index (0-based); available animals averaged at each trial")
+    ax_total.set_xlabel("Cumulative trial index (0-based)" if individual_only else
+                        "Cumulative trial index (0-based); available animals averaged at each trial")
     fig.tight_layout()
     if show:
         plt.show(block=block)
@@ -413,13 +422,16 @@ def plot_batch_session_performance(
     total_values = []
     sorted_sessions = sorted(
         performance_by_file.items(),
-        key=lambda item: _natural_sort_key(Path(item[0]).stem or str(item[0])),
+        key=session_sort_key,
     )
 
+    session_label_by_key = {}
     for session_key, perf_data in sorted_sessions:
         if not isinstance(perf_data, dict) or "error" in perf_data:
             continue
-        session_labels.append(Path(session_key).stem or str(session_key))
+        label = f"sess{len(session_labels) + 1}"
+        session_label_by_key[session_key] = label
+        session_labels.append(label)
         go_values.append(float(perf_data.get("go", np.nan)))
         nogo_values.append(float(perf_data.get("nogo", np.nan)))
         total_values.append(float(perf_data.get("total", np.nan)))
@@ -461,7 +473,7 @@ def plot_batch_session_performance(
     ax.set_ylim(-10, 110)
     ax.set_yticks([0, 50, 100])
     ax.set_xticks(x)
-    ax.set_xticklabels(session_labels, rotation=45, ha="right")
+    ax.set_xticklabels(session_labels, rotation=0, ha="center")
     ax.grid(True, axis="y", color="#E1E1E1", linewidth=0.7)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -501,7 +513,7 @@ def plot_batch_session_performance(
             go_trial_perf.extend(go_values.tolist())
             nogo_trial_perf.extend(nogo_values.tolist())
             session_centers.append(x_offset + ((n_trials - 1) / 2))
-            trial_session_labels.append(Path(session_key).stem or str(session_key))
+            trial_session_labels.append(session_label_by_key[session_key])
             x_offset += n_trials
 
         if all_x:
@@ -536,7 +548,7 @@ def plot_batch_session_performance(
                 ax_trials.axvline(boundary, color="gray", ls="--", lw=1, alpha=0.55)
                 ax_rolling.axvline(boundary, color="gray", ls="--", lw=1, alpha=0.55)
             ax_trials.set_xticks(session_centers)
-            ax_trials.set_xticklabels(trial_session_labels, rotation=45, ha="right")
+            ax_trials.set_xticklabels(trial_session_labels, rotation=0, ha="center")
             ax_trials.set_xlim(-1, max(all_x) + 1)
         else:
             ax_trials.text(
@@ -553,7 +565,7 @@ def plot_batch_session_performance(
         ax_rolling.set_ylabel("Performance (%)")
         ax_rolling.set_ylim(-10, 110)
         ax_rolling.set_yticks([0, 50, 100])
-        ax_rolling.tick_params(axis="x", labelrotation=45)
+        ax_rolling.tick_params(axis="x", labelrotation=0)
         ax_rolling.grid(True, axis="y", color="#E1E1E1", linewidth=0.7)
         ax_rolling.spines["top"].set_visible(False)
         ax_rolling.spines["right"].set_visible(False)

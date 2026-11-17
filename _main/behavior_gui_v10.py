@@ -95,6 +95,7 @@ class ScanMediaFoldersApp:
         self.group_exports = {}
         self.group_folder = None
         self.group_folders = []
+        self._group_file_export_busy = False
         self.group_trial_data = {}
         self._group_trial_data_loading = False
         self.groups_loading = False
@@ -1466,8 +1467,76 @@ class ScanMediaFoldersApp:
                            "Only finite estimates enter the group mean and SEM.\n")
         plt.show(block=False)
 
+    def _generate_group_files(self):
+        if self.groups_loading or self._group_file_export_busy or self._group_trial_data_loading:
+            return
+        if not self.group_assignments:
+            messagebox.showinfo("Generate group files", "Assign animals to groups first.", parent=self.root)
+            return
+        destination = filedialog.askdirectory(parent=self.root, title="Choose output folder for group files")
+        if not destination:
+            return
+        exports, assignments = dict(self.group_exports), dict(self.group_assignments)
+        self._group_file_export_busy = True
+        self.status_var.set("Generating group files...")
+        self._draw_selected_input_box()
+        messages = queue.Queue()
+
+        def worker():
+            try:
+                from group_file_export import build_group_files
+                from tempfile import mkdtemp
+                output = Path(mkdtemp(prefix="gonogo_group_files_", dir=destination))
+                result = build_group_files(exports, assignments, output,
+                                            progress=lambda text: messages.put(("progress", text)))
+                messages.put(("result", result))
+            except Exception as exc:
+                messages.put(("error", str(exc)))
+
+        def poll():
+            for _ in range(20):
+                try:
+                    kind, payload = messages.get_nowait()
+                except queue.Empty:
+                    self.root.after(50, poll)
+                    return
+                if kind == "progress":
+                    self._write_output(payload + "\n")
+                    self.status_var.set(payload)
+                elif kind == "error":
+                    self._group_file_export_busy = False
+                    self.status_var.set("Group file generation failed")
+                    self._write_output("Group file generation failed: " + payload + "\n")
+                    self._draw_selected_input_box()
+                    messagebox.showerror("Group file generation failed", payload, parent=self.root)
+                    return
+                elif kind == "result":
+                    groups, sources, warnings = payload
+                    self.group_trial_data = groups
+                    self.preferences["group_trial_data_sources"] = sources
+                    for warning in warnings:
+                        self._write_output("Group file warning: " + warning + "\n")
+                    try:
+                        self.guide_settings_path.write_text(json.dumps(self.preferences, indent=2), encoding="utf-8")
+                    except OSError as exc:
+                        warnings.append(f"Files saved, but source paths could not be saved to preferences: {exc}")
+                        self._write_output(warnings[-1] + "\n")
+                    self._group_file_export_busy = False
+                    session_count = sum(len(animal["sessions"]) for animals in groups.values() for animal in animals.values())
+                    summary = f"Generated {len(sources)} group files; {session_count} fork-analyzed sessions; {len(warnings)} warnings."
+                    self.status_var.set(summary)
+                    self._write_output(summary + "\n")
+                    self._draw_selected_input_box()
+                    if warnings:
+                        messagebox.showwarning("Group files generated with warnings", "\n".join(warnings[:15]), parent=self.root)
+                    return
+            self.root.after(50, poll)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(50, poll)
+
     def _load_group_trial_data(self):
-        if self._group_trial_data_loading:
+        if self._group_trial_data_loading or self._group_file_export_busy:
             return
         sources = self.preferences.get("group_trial_data_sources", [])
         if not isinstance(sources, list) or not sources:
@@ -1602,15 +1671,17 @@ class ScanMediaFoldersApp:
         ax = self.main_canvas_ax
         ax.clear()
         ax.axis("off")
-        if self.groups_loading:
-            self._canvas_button(16, 16, "Loading...", "groups_loading",
+        if self.groups_loading or self._group_file_export_busy:
+            self._canvas_button(16, 16, "Generating..." if self._group_file_export_busy else "Loading...", "groups_loading",
                                 "#EEEEEE", "#AAAAAA", enabled=False, ax=ax)
         elif self.group_exports and self.group_assignments:
             self._canvas_button(16, 16, "Plot Curves\nSingle Animals", "plot_single_animal_curves",
                                 "#F3FAF1", "#59A14F", ax=ax)
             self._canvas_button(182, 16, "Plot Group\nAverages", "plot_group_averages",
                                 "#F3FAF1", "#59A14F", ax=ax)
-        busy = self._group_trial_data_loading
+            self._canvas_button(348, 16, "Generate\ngroup files", "generate_group_files",
+                                "#F3FAF1", "#59A14F", ax=ax)
+        busy = self._group_trial_data_loading or self._group_file_export_busy
         self._canvas_button(16, 82, "Loading..." if busy else "Load group\ntrial data", "load_group_trial_data",
                             "#EEEEEE" if busy else "#F3FAF1", "#AAAAAA" if busy else "#59A14F", enabled=not busy, ax=ax)
         if self.group_trial_data:
@@ -1701,6 +1772,9 @@ class ScanMediaFoldersApp:
         self.main_canvas.draw()
 
     def _handle_main_canvas_pick(self, event) -> None:
+        if event.artist.get_gid() == "generate_group_files":
+            self._generate_group_files()
+            return
         if event.artist.get_gid() == "load_group_trial_data":
             self._load_group_trial_data()
             return
